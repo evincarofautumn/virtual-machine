@@ -250,10 +250,13 @@ data Indexed a = Indexed { indexOf :: !Int, indexValue :: !a }
 programFromInputProgram (InputProgram (Vector.toList -> instructions))
   = runIdMap $ mapM toBlock basicBlocks
   where
-  toBlock (Indexed index instructions) = let
-    blockInitial = Target index
-    (map toMedial -> blockMedials, toFinal -> blockFinal) = initLast instructions
-    in return BasicBlock{..}
+  toBlock (Indexed index instructions) = do
+    blockInitial <- freshId (Target index)
+    let
+      (medials, final) = initLast instructions
+      blockMedials = map toMedial medials
+    blockFinal <- toFinal final
+    return BasicBlock{..}
   toMedial = \case
     Add out left right -> MAdd out left right
     Equals out left right -> MEquals out left right
@@ -265,11 +268,16 @@ programFromInputProgram (InputProgram (Vector.toList -> instructions))
     Set register constant -> MSet register constant
     instruction -> error $ "Non-medial instruction in medial position: " ++ show instruction
   toFinal = \case
-    Call target depth register next -> FCall target depth register next
-    Jump target -> FJump target
-    JumpIfZero register target next -> FJumpIfZero register target next
-    Return register -> FReturn register
+    Call target depth register next
+      -> FCall <$> freshId target <*> pure depth <*> pure register <*> freshId next
+    Jump target -> FJump <$> freshId target
+    JumpIfZero register target next
+      -> FJumpIfZero register <$> freshId target <*> freshId next
+    Return register -> return $ FReturn register
     instruction -> error $ "Non-final instruction in final position: " ++ show instruction
+
+  -- TODO: Finish switching from indices to labels, and insert explicit jumps
+  -- off the ends of basic blocks that end in medial instructions.
 
   basicBlocks = (\x -> traceShow x x) . map indexedGroup
     $ groupBy ((==) `on` nearestLabelTo . indexOf) instructionsWithIndices
@@ -294,7 +302,7 @@ programFromInputProgram (InputProgram (Vector.toList -> instructions))
 data Program = Program [BasicBlock]
 
 data BasicBlock = BasicBlock
-  { blockInitial :: Target
+  { blockInitial :: Label
   , blockMedials :: [Medial]
   , blockFinal :: Final
   } deriving (Show)
@@ -311,9 +319,9 @@ data Medial
   deriving (Show)
 
 data Final
-  = FCall Target Depth Register Target
-  | FJump Target
-  | FJumpIfZero Register Target Target
+  = FCall Label Depth Register Label
+  | FJump Label
+  | FJumpIfZero Register Label Label
   | FReturn Register
   deriving (Show)
 
@@ -377,7 +385,17 @@ instance Monad IdMapMonad where
     (env', x) <- f env
     unIdMap (m x) env'
 
-freshId index = IdMapMonad $ \env -> case IntMap.lookup index env of
+instance Functor IdMapMonad where
+  fmap f m = m >>= return . f
+
+instance Applicative IdMapMonad where
+  pure x = IdMapMonad $ \env -> return (env, x)
+  mf <*> mx = do
+    f <- mf
+    x <- mx
+    return $ f x
+
+freshId (Target index) = IdMapMonad $ \env -> case IntMap.lookup index env of
   Just existing -> return (env, existing)
   Nothing -> do
     label <- freshLabel
