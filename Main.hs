@@ -1,8 +1,10 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeSynonymInstances #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
+{-#
+  LANGUAGE OverloadedStrings
+  , TypeSynonymInstances
+  , FlexibleContexts
+  , FlexibleInstances
+  , NoMonomorphismRestriction
+  #-}
 
 module Main where
 
@@ -24,8 +26,6 @@ import qualified Data.Text.Lazy.IO as Lazy
 import qualified Data.Vector as Vector
 import qualified Data.Vector.Mutable as Mutable
 import qualified Data.Vector.Unboxed.Mutable as Unboxed
-
--- import Debug.Trace
 
 -- | An instruction in the input program.
 data Instruction
@@ -71,7 +71,6 @@ main = do
     [] -> bug "System.IndexOutOfRangeException: Array index is out of range."
     filename : rawMachineArgs -> do
       file <- Lazy.readFile filename `catch` missing
-      -- Text.putStrLn file
       case readProgram filename file of
         Left message -> hPrint stderr message >> exitFailure
         Right program -> do
@@ -169,13 +168,6 @@ run (InputProgram instructions) machineArguments = do
 
   fix $ \loop -> do
     instruction <- (instructions Vector.!) <$> readIORef pc
-
-    {-
-    do
-      pc' <- readIORef pc
-      vsp' <- readIORef vsp
-      putStrLn $ concat ["pc:", show pc', " vsp:", show vsp', " ", show instruction]
-    -}
 
     action <- case instruction of
       Add out left right -> binary (+) out left right >> proceed
