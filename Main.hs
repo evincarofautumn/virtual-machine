@@ -23,6 +23,7 @@ import qualified Data.Text.Lazy as Lazy
 import qualified Data.Text.Lazy.IO as Lazy
 import qualified Data.Vector as Vector
 import qualified Data.Vector.Mutable as Mutable
+import qualified Data.Vector.Unboxed.Mutable as Unboxed
 
 -- import Debug.Trace
 
@@ -125,25 +126,27 @@ readProgram = parse program
 run :: InputProgram -> Vector Cell -> IO Cell
 run (InputProgram instructions) machineArguments = do
   cs <- Mutable.new callStackSize
-  vs <- Mutable.new valueStackSize
+  vs <- Unboxed.new valueStackSize
   csp <- newIORef (0 :: Int)
   vsp <- newIORef (0 :: Int)
   pc <- newIORef (0 :: Int)
 
   let
-    push s sp value = do
-      sp' <- readIORef sp
-      Mutable.unsafeWrite s sp' value
-      modifyIORef' sp succ
-    pushValue = push vs vsp
-    pushCall = push cs csp
+    pushValue value = do
+      vsp' <- readIORef vsp
+      Unboxed.unsafeWrite vs vsp' value
+      modifyIORef' vsp succ
+    pushCall value = do
+      csp' <- readIORef csp
+      Mutable.unsafeWrite cs csp' value
+      modifyIORef' csp succ
     binary f out left right = do
       value <- f <$> readRegister left <*> readRegister right
       writeRegister out value
     unary f out in_ = writeRegister out . f =<< readRegister in_
     writeRegister (Register n) x
-      = registerOffset n >>= \n' -> Mutable.unsafeWrite vs n' x
-    readRegister (Register n) = Mutable.unsafeRead vs =<< registerOffset n
+      = registerOffset n >>= \n' -> Unboxed.unsafeWrite vs n' x
+    readRegister (Register n) = Unboxed.unsafeRead vs =<< registerOffset n
     registerOffset n = (+) <$> readIORef vsp <*> pure n
     jump (Offset offset) = modifyIORef' pc (+ offset) >> return Resume
     proceed = return Proceed
