@@ -27,42 +27,8 @@ import qualified Data.Vector as Vector
 import qualified Data.Vector.Mutable as Mutable
 import qualified Data.Vector.Unboxed.Mutable as Unboxed
 
--- | An instruction in the input program.
-data Instruction
-  = Add Register Register Register
-  | Call Offset Depth Register
-  | Equals Register Register Register
-  | Jump Offset
-  | JumpIfZero Register Offset
-  | LessThan Register Register Register
-  | Move Register Register
-  | Multiply Register Register Register
-  | Negate Register Register
-  | Not Register Register
-  | Return Register
-  | Set Register Constant
-  deriving (Show)
-
--- | A constant integer in the input program.
-newtype Constant = Constant Cell
-  deriving (Show)
-
--- | A depth on the stack.
-newtype Depth = Depth Int
-  deriving (Show)
-
--- | An offset between instructions in the input program.
-newtype Offset = Offset Int
-  deriving (Show)
-
--- | A register name.
-newtype Register = Register Int
-  deriving (Show)
-
-newtype InputProgram = InputProgram (Vector Instruction)
-  deriving (Show)
-
-type Cell = Int64
+--------------------------------------------------------------------------------
+-- Entry point
 
 main :: IO ()
 main = do
@@ -85,17 +51,57 @@ main = do
           ]
         else throwIO e
 
+--------------------------------------------------------------------------------
+-- Input data types
+
+-- | An instruction in the input program.
+data InputInstruction
+  = Add Register Register Register
+  | Call Target Depth Register
+  | Equals Register Register Register
+  | Jump Target
+  | JumpIfZero Register Target
+  | LessThan Register Register Register
+  | Move Register Register
+  | Multiply Register Register Register
+  | Negate Register Register
+  | Not Register Register
+  | Return Register
+  | Set Register Constant
+  deriving (Show)
+
+-- | A constant integer in the input program.
+newtype Constant = Constant Cell
+  deriving (Show)
+
+-- | A depth on the stack.
+newtype Depth = Depth Int
+  deriving (Show)
+
+-- | A jump target in the input program.
+newtype Target = Target Int
+  deriving (Show)
+
+-- | A register name.
+newtype Register = Register Int
+  deriving (Show)
+
+newtype InputProgram = InputProgram (Vector InputInstruction)
+  deriving (Show)
+
+type Cell = Int64
+
 readProgram :: SourceName -> Lazy.Text -> Either ParseError InputProgram
 readProgram = parse program
   where
   program = InputProgram . Vector.fromList <$> (statement `sepEndBy` many1 newline)
-  statement = horizontals *> unsigned >>= instruction
-  instruction pc = choice
+  statement = horizontals *> digits *> instruction
+  instruction = choice
     [ Add <$ (word "Add") <*> registerComma <*> registerComma <*> register
-    , Call <$ (word "Call") <*> (offset pc <* comma) <*> (depth <* comma) <*> register
+    , Call <$ (word "Call") <*> (target <* comma) <*> (depth <* comma) <*> register
     , register3 (word "Equals") Equals
-    , try $ Jump <$ word "Jump" <*> offset pc
-    , JumpIfZero <$ (word "JumpIfZero") <*> registerComma <*> offset pc
+    , try $ Jump <$ word "Jump" <*> target
+    , JumpIfZero <$ (word "JumpIfZero") <*> registerComma <*> target
     , register3 (word "LessThan") LessThan
     , try $ register2 (word "Move") Move
     , register3 (word "Multiply") Multiply
@@ -105,7 +111,7 @@ readProgram = parse program
     , Set <$ word "Set" <*> registerComma <*> constant
     ]
   digits = lexeme (many1 digit) <?> "number"
-  offset pc = Offset . subtract pc <$> unsigned <?> "offset"
+  target = Target <$> unsigned <?> "jump target"
   unsigned = read <$> digits
   signed = (negate <$ char '-' <|> pure id) <*> unsigned
   depth = Depth <$> unsigned
@@ -147,7 +153,7 @@ run (InputProgram instructions) machineArguments = do
       = registerOffset n >>= \n' -> Unboxed.unsafeWrite vs n' x
     readRegister (Register n) = Unboxed.unsafeRead vs =<< registerOffset n
     registerOffset n = (+) <$> readIORef vsp <*> pure n
-    jump (Offset offset) = modifyIORef' pc (+ offset) >> return Resume
+    jump (Target target) = writeIORef pc target >> return Resume
     proceed = return Proceed
     halt = return . Halt
     enter frame@(StackFrame _ (Depth depth) _) = do
@@ -171,15 +177,15 @@ run (InputProgram instructions) machineArguments = do
 
     action <- case instruction of
       Add out left right -> binary (+) out left right >> proceed
-      Call offset depth result -> do
+      Call target depth result -> do
         pc' <- readIORef pc
         enter $ StackFrame pc' depth result
-        jump offset
+        jump target
       Equals out left right -> binary (bool .: (==)) out left right >> proceed
-      Jump offset -> jump offset
-      JumpIfZero register offset -> do
+      Jump target -> jump target
+      JumpIfZero register target -> do
         value <- readRegister register
-        if value == 0 then jump offset else proceed
+        if value == 0 then jump target else proceed
       LessThan out left right -> binary (bool .: (<)) out left right >> proceed
       Move out in_ -> unary id out in_ >> proceed
       Multiply out left right -> binary (*) out left right >> proceed
