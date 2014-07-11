@@ -13,30 +13,32 @@ module Main where
 
 import Compiler.Hoopl hiding ((<*>))
 import Control.Applicative
+import Control.Arrow (first)
 import Control.Exception hiding (try)
+import Control.Monad.Trans.Class
 import Data.Function
 import Data.IORef
 import Data.Int
 import Data.IntMap (IntMap)
-import Data.IntSet (IntSet)
 import Data.List
+import Data.Map (Map)
+import Data.Maybe
 import Data.Vector (Vector)
 import System.Environment
 import System.Exit
 import System.IO
 import System.IO.Error
-import Text.Parsec hiding ((<|>), many)
+import Text.Parsec hiding ((<|>), label, many)
 import Text.Parsec.Text.Lazy ()
 
+import qualified Compiler.Hoopl as Hoopl
 import qualified Data.IntMap as IntMap
-import qualified Data.IntSet as IntSet
+import qualified Data.Map as Map
 import qualified Data.Text.Lazy as Lazy
 import qualified Data.Text.Lazy.IO as Lazy
 import qualified Data.Vector as Vector
 import qualified Data.Vector.Mutable as Mutable
 import qualified Data.Vector.Unboxed.Mutable as Unboxed
-
-import Debug.Trace
 
 --------------------------------------------------------------------------------
 -- Entry point
@@ -49,12 +51,9 @@ main = do
     filename : rawMachineArgs -> do
       file <- Lazy.readFile filename `catch` missing
       case parseProgram filename file of
-        Left message -> hPrint stderr message >> exitFailure
-        Right inputProgram -> do
-          let
-            (_, program) = runSimpleUniqueMonad
-              $ programFromInputProgram inputProgram
-          print program
+        (_, Left message) -> hPrint stderr message >> exitFailure
+        (_idMap, Right inputProgram) -> do
+          let !program = programFromInputProgram inputProgram
           result <- run inputProgram $ Vector.fromList (map read rawMachineArgs)
           print result
       where
@@ -71,18 +70,36 @@ main = do
 
 -- | An instruction in the input program.
 data InputInstruction
-  = Add Register Register Register
-  | Call Target Depth Register Target
-  | Equals Register Register Register
-  | Jump Target
-  | JumpIfZero Register Target Target
-  | LessThan Register Register Register
-  | Move Register Register
-  | Multiply Register Register Register
-  | Negate Register Register
-  | Not Register Register
-  | Return Register
-  | Set Register Constant
+  = Add Label Register Register Register
+  | Call Label LabelledTarget Depth Register LabelledTarget
+  | Equals Label Register Register Register
+  | Jump Label LabelledTarget
+  | JumpIfZero Label Register LabelledTarget LabelledTarget
+  | LessThan Label Register Register Register
+  | Move Label Register Register
+  | Multiply Label Register Register Register
+  | Negate Label Register Register
+  | Not Label Register Register
+  | Return Label Register
+  | Set Label Register Constant
+  deriving (Show)
+
+instructionLabel :: InputInstruction -> Label
+instructionLabel = \case
+  Add l _ _ _ -> l
+  Call l _ _ _ _ -> l
+  Equals l _ _ _ -> l
+  Jump l _ -> l
+  JumpIfZero l _ _ _ -> l
+  LessThan l _ _ _ -> l
+  Move l _ _ -> l
+  Multiply l _ _ _ -> l
+  Negate l _ _ -> l
+  Not l _ _ -> l
+  Return l _ -> l
+  Set l _ _ -> l
+
+data LabelledTarget = LabelledTarget Label Target
   deriving (Show)
 
 -- | A constant integer in the input program.
@@ -106,26 +123,39 @@ newtype InputProgram = InputProgram { inputInstructions :: Vector InputInstructi
 
 type Cell = Int64
 
-parseProgram :: SourceName -> Lazy.Text -> Either ParseError InputProgram
-parseProgram = parse program
+parseProgram :: SourceName -> Lazy.Text -> (IdMap, Either ParseError InputProgram)
+parseProgram filename file = runSimpleUniqueMonad . runIdMap $ runParserT program () filename file
   where
-  program = InputProgram . Vector.fromList <$> (statement `sepEndBy` many1 newline)
+  program = InputProgram . Vector.fromList -- . concat
+    <$> ((statement `sepEndBy` many1 newline) <* eof)
   statement = horizontals *> target >>= instruction
-  instruction pc = choice
-    [ Add <$ (word "Add") <*> registerComma <*> registerComma <*> register
-    , Call <$ (word "Call") <*> (target <* comma) <*> (depth <* comma) <*> register <*> next
-    , register3 (word "Equals") Equals
-    , try $ Jump <$ word "Jump" <*> target
-    , JumpIfZero <$ (word "JumpIfZero") <*> registerComma <*> target <*> next
-    , register3 (word "LessThan") LessThan
-    , try $ register2 (word "Move") Move
-    , register3 (word "Multiply") Multiply
-    , try $ register2 (word "Negate") Negate
-    , register2 (word "Not") Not
-    , Return <$ word "Return" <*> register
-    , Set <$ word "Set" <*> registerComma <*> constant
-    ]
-    where next = pure $ succ pc
+  instruction pc = do
+    current <- lift $ labelForTarget pc
+    next <- let pc' = succ pc
+      in LabelledTarget <$> lift (labelForTarget pc') <*> pure pc'
+    medial current <|> final current next
+    where
+    medial current = choice
+      [ Add current <$ word "Add" <*> registerComma <*> registerComma <*> register
+      , register3 (word "Equals") (Equals current)
+      , register3 (word "LessThan") (LessThan current)
+      , try $ register2 (word "Move") (Move current)
+      , register3 (word "Multiply") (Multiply current)
+      , try $ register2 (word "Negate") (Negate current)
+      , register2 (word "Not") (Not current)
+      , Set current <$ word "Set" <*> registerComma <*> constant
+      ]
+    final current next = choice
+      [ Call current <$ word "Call"
+        <*> (label <* comma) <*> (depth <* comma) <*> register <*> pure next
+      , try $ Jump current <$ word "Jump" <*> label
+      , JumpIfZero current <$ word "JumpIfZero"
+        <*> registerComma <*> label <*> pure next
+      , Return current <$ word "Return" <*> register
+      ]
+    label = do
+      t <- target
+      LabelledTarget <$> lift (labelForTarget t) <*> pure t
   digits = lexeme (many1 digit) <?> "number"
   target = Target <$> unsigned <?> "jump target"
   unsigned = read <$> digits
@@ -201,28 +231,28 @@ run (InputProgram instructions) machineArguments = do
     -}
 
     action <- case instruction of
-      Add out left right -> binary (+) out left right >> proceed
-      Call target depth result next -> do
+      Add _ out left right -> binary (+) out left right >> proceed
+      Call _ (LabelledTarget _ target) depth result (LabelledTarget _ next) -> do
         enter $ StackFrame next depth result
         jump target
-      Equals out left right -> binary (bool .: (==)) out left right >> proceed
-      Jump target -> jump target
-      JumpIfZero register target next -> do
+      Equals _ out left right -> binary (bool .: (==)) out left right >> proceed
+      Jump _ (LabelledTarget _ target) -> jump target
+      JumpIfZero _ register (LabelledTarget _ target) (LabelledTarget _ next) -> do
         value <- readRegister register
         if value == 0 then jump target else jump next
-      LessThan out left right -> binary (bool .: (<)) out left right >> proceed
-      Move out in_ -> unary id out in_ >> proceed
-      Multiply out left right -> binary (*) out left right >> proceed
-      Negate out in_ -> unary negate out in_ >> proceed
-      Not out in_ -> unary (bool . (== 0)) out in_ >> proceed
-      Return result -> do
+      LessThan _ out left right -> binary (bool .: (<)) out left right >> proceed
+      Move _ out in_ -> unary id out in_ >> proceed
+      Multiply _ out left right -> binary (*) out left right >> proceed
+      Negate _ out in_ -> unary negate out in_ >> proceed
+      Not _ out in_ -> unary (bool . (== 0)) out in_ >> proceed
+      Return _ result -> do
         csp' <- pred <$> readIORef csp
         result' <- readRegister result
         if csp' < 0 then halt result' else do
           StackFrame next _ out <- leave
           writeRegister out result'
           jump next
-      Set register (Constant constant) -> writeRegister register constant >> proceed
+      Set _ register (Constant constant) -> writeRegister register constant >> proceed
 
     case action of
       Proceed -> modifyIORef' pc succ >> loop
@@ -247,93 +277,40 @@ data StackFrame = StackFrame Target Depth Register
 data Indexed a = Indexed { indexOf :: !Int, indexValue :: !a }
   deriving (Show)
 
+programFromInputProgram :: InputProgram -> Graph Instruction C C
 programFromInputProgram (InputProgram (Vector.toList -> instructions))
-  = runIdMap $ mapM toBlock basicBlocks
+  = foldl' (|*><*|) emptyClosedGraph (blockify instructions)
   where
-  toBlock (Indexed index instructions) = do
-    blockInitial <- freshId (Target index)
-    let
-      (medials, final) = initLast instructions
-      blockMedials = map toMedial medials
-    blockFinal <- toFinal final
-    return BasicBlock{..}
+  blockify is@(i : _) = let
+    initial = ILabel $ instructionLabel i
+    (medials, is') = spanJust toMedial is
+    (final, is'') = first
+      (fromMaybe (error "Missing final instruction in basic block."))
+      (spanJust1 toFinal is')
+    in (mkFirst initial Hoopl.<*> mkMiddles medials Hoopl.<*> mkLast final)
+      : blockify is''
+  blockify [] = []
+
   toMedial = \case
-    Add out left right -> MAdd out left right
-    Equals out left right -> MEquals out left right
-    LessThan out left right -> MLessThan out left right
-    Move out in_ -> MMove out in_
-    Multiply out left right -> MMultiply out left right
-    Negate out in_ -> MNegate out in_
-    Not out in_ -> MNot out in_
-    Set register constant -> MSet register constant
-    instruction -> error $ "Non-medial instruction in medial position: " ++ show instruction
+    Add _ out left right -> Just $ IAdd out left right
+    Equals _ out left right -> Just $ IEquals out left right
+    LessThan _ out left right -> Just $ ILessThan out left right
+    Move _ out in_ -> Just $ IMove out in_
+    Multiply _ out left right -> Just $ IMultiply out left right
+    Negate _ out in_ -> Just $ INegate out in_
+    Not _ out in_ -> Just $ INot out in_
+    Set _ register constant -> Just $ ISet register constant
+    _ -> Nothing
+
   toFinal = \case
-    Call target depth register next
-      -> FCall <$> freshId target <*> pure depth <*> pure register <*> freshId next
-    Jump target -> FJump <$> freshId target
-    JumpIfZero register target next
-      -> FJumpIfZero register <$> freshId target <*> freshId next
-    Return register -> return $ FReturn register
-    instruction -> error $ "Non-final instruction in final position: " ++ show instruction
+    Call _ (LabelledTarget target _) depth register (LabelledTarget next _)
+      -> Just $ ICall target depth register next
+    Jump _ (LabelledTarget target _) -> Just $ IJump target
+    JumpIfZero _ register (LabelledTarget target _) (LabelledTarget next _)
+      -> Just $ IJumpIfZero register target next
+    Return _ register -> Just $ IReturn register
+    _ -> Nothing
 
-  -- TODO: Finish switching from indices to labels, and insert explicit jumps
-  -- off the ends of basic blocks that end in medial instructions.
-
-  basicBlocks = (\x -> traceShow x x) . map indexedGroup
-    $ groupBy ((==) `on` nearestLabelTo . indexOf) instructionsWithIndices
-
-  -- 'head' is safe here because 'groupBy' produces a list of nonempty lists.
-  indexedGroup x = Indexed (head (map indexOf x)) (map indexValue x)
-
-  nearestLabelTo = (`IntSet.lookupLE` labels)
-  !labels = (\x -> traceShow x x) . IntSet.insert entryTarget . IntSet.fromList
-    $ concatMap instructionLabel instructionsWithIndices
-    where
-    entryTarget = 0
-    instructionLabel (Indexed index instruction) = case instruction of
-      Call (Target target) _ _ (Target next) -> [target, next]
-      Jump (Target target) -> [target, succ index]
-      JumpIfZero _ (Target target) (Target next) -> [target, next]
-      Return{} -> [succ index]
-      _ -> []
-
-  instructionsWithIndices = zipWith Indexed [0..] instructions
-
-data Program = Program [BasicBlock]
-
-data BasicBlock = BasicBlock
-  { blockInitial :: Label
-  , blockMedials :: [Medial]
-  , blockFinal :: Final
-  } deriving (Show)
-
-data Medial
-  = MAdd Register Register Register
-  | MEquals Register Register Register
-  | MLessThan Register Register Register
-  | MMove Register Register
-  | MMultiply Register Register Register
-  | MNegate Register Register
-  | MNot Register Register
-  | MSet Register Constant
-  deriving (Show)
-
-data Final
-  = FCall Label Depth Register Label
-  | FJump Label
-  | FJumpIfZero Register Label Label
-  | FReturn Register
-  deriving (Show)
-
-isFinal :: InputInstruction -> Bool
-isFinal = \case
-  Call{} -> True
-  Jump{} -> True
-  JumpIfZero{} -> True
-  Return{} -> True
-  _ -> False
-
-{-
 -- | An instruction in the intermediate representation, indexed by openness at
 -- entry and exit: an instruction with a closed entry cannot be preceded by
 -- another instruction, and an instruction with a closed exit cannot itself
@@ -342,7 +319,7 @@ isFinal = \case
 data Instruction e x where
   ILabel :: Label -> Instruction C O
   IAdd :: Register -> Register -> Register -> Instruction O O
-  ICall :: Label -> Depth -> Register -> Instruction O C
+  ICall :: Label -> Depth -> Register -> Label -> Instruction O C
   IEquals :: Register -> Register -> Register -> Instruction O O
   IJump :: Label -> Instruction O C
   IJumpIfZero :: Register -> Label -> Label -> Instruction O C
@@ -358,7 +335,14 @@ data IrProgram = IrProgram
   { programEntry :: Label
   , programBody :: Graph Instruction C C
   }
--}
+
+instance NonLocal Instruction where
+  entryLabel (ILabel l) = l
+  successors = \case
+    ICall _ _ _ l -> [l]
+    IJump l -> [l]
+    IJumpIfZero _ t f -> [t, f]
+    IReturn{} -> []
 
 --------------------------------------------------------------------------------
 -- Miscellany
@@ -366,15 +350,26 @@ data IrProgram = IrProgram
 bug :: String -> a
 bug = error
 
-initLast :: [a] -> ([a], a)
-initLast [] = error "initLast: empty list"
-initLast [x] = ([], x)
-initLast (x:xs) = let (xs', x') = initLast xs in (x : xs', x')
+spanJust :: (a -> Maybe b) -> [a] -> ([b], [a])
+spanJust f = go []
+  where
+  go ys l@(x : xs) = maybe (ys, l) (\y -> go (y : ys) xs) (f x)
+  go ys [] = (ys, [])
+
+spanJust1 :: (a -> Maybe b) -> [a] -> (Maybe b, [a])
+spanJust1 f l@(x : xs) = case f x of
+  Nothing -> (Nothing, l)
+  x'@Just{} -> (x', xs)
+spanJust1 _ [] = (Nothing, [])
 
 --------------------------------------------------------------------------------
 -- Source of unique labels
 
 type IdMap = IntMap Label
+
+invertIdMap :: IdMap -> Map Label Int
+invertIdMap = Map.fromList . map swap . IntMap.toList
+  where swap (a, b) = (b, a)
 
 newtype IdMapMonad a = IdMapMonad
   { unIdMap :: IdMap -> SimpleUniqueMonad (IdMap, a) }
@@ -395,10 +390,13 @@ instance Applicative IdMapMonad where
     x <- mx
     return $ f x
 
-freshId (Target index) = IdMapMonad $ \env -> case IntMap.lookup index env of
-  Just existing -> return (env, existing)
-  Nothing -> do
-    label <- freshLabel
-    return (IntMap.insert index label env, label)
+labelForTarget :: Target -> IdMapMonad Label
+labelForTarget (Target index) = IdMapMonad
+  $ \env -> case IntMap.lookup index env of
+    Just existing -> return (env, existing)
+    Nothing -> do
+      label <- freshLabel
+      return (IntMap.insert index label env, label)
 
+runIdMap :: IdMapMonad a -> SimpleUniqueMonad (IdMap, a)
 runIdMap (IdMapMonad m) = m IntMap.empty
