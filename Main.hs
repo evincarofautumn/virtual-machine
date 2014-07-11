@@ -6,6 +6,8 @@
   , LambdaCase
   , NoMonomorphismRestriction
   , RecordWildCards
+  , StandaloneDeriving
+  , TypeFamilies
   , ViewPatterns
   #-}
 
@@ -23,17 +25,20 @@ import Data.IntMap (IntMap)
 import Data.List
 import Data.Map (Map)
 import Data.Maybe
+import Data.Monoid
+import Data.Set (Set)
 import Data.Vector (Vector)
 import System.Environment
 import System.Exit
 import System.IO
 import System.IO.Error
-import Text.Parsec hiding ((<|>), label, many)
+import Text.Parsec hiding (State, (<|>), label, many)
 import Text.Parsec.Text.Lazy ()
 
 import qualified Compiler.Hoopl as Hoopl
 import qualified Data.IntMap as IntMap
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import qualified Data.Text.Lazy as Lazy
 import qualified Data.Text.Lazy.IO as Lazy
 import qualified Data.Vector as Vector
@@ -53,7 +58,12 @@ main = do
       case parseProgram filename file of
         (_, Left message) -> hPrint stderr message >> exitFailure
         (_idMap, Right inputProgram) -> do
-          let !program = programFromInputProgram inputProgram
+          let (program, entry) = programFromInputProgram inputProgram
+          putStrLn "Input: "
+          putStrLn $ showGraph show program
+          let optimized = optimize entry program
+          putStrLn "\nOptimized: "
+          putStrLn $ showGraph show optimized
           result <- run inputProgram $ Vector.fromList (map read rawMachineArgs)
           print result
       where
@@ -104,7 +114,9 @@ data LabelledTarget = LabelledTarget Label Target
 
 -- | A constant integer in the input program.
 newtype Constant = Constant Cell
-  deriving (Show)
+
+instance Show Constant where
+  show (Constant c) = show c
 
 -- | A depth on the stack.
 newtype Depth = Depth Int
@@ -116,7 +128,10 @@ newtype Target = Target Int
 
 -- | A register name.
 newtype Register = Register Int
-  deriving (Show)
+  deriving (Eq, Ord)
+
+instance Show Register where
+  show (Register r) = '$' : show r
 
 newtype InputProgram = InputProgram { inputInstructions :: Vector InputInstruction }
   deriving (Show)
@@ -221,15 +236,6 @@ run (InputProgram instructions) machineArguments = do
   fix $ \loop -> do
     instruction <- (instructions Vector.!) <$> readIORef pc
 
-    {-
-    do
-      putStr "vsp:"
-      print =<< readIORef vsp
-      putStr " pc:"
-      print =<< readIORef pc
-      print instruction
-    -}
-
     action <- case instruction of
       Add _ out left right -> binary (+) out left right >> proceed
       Call _ (LabelledTarget _ target) depth result (LabelledTarget _ next) -> do
@@ -277,9 +283,11 @@ data StackFrame = StackFrame Target Depth Register
 data Indexed a = Indexed { indexOf :: !Int, indexValue :: !a }
   deriving (Show)
 
-programFromInputProgram :: InputProgram -> Graph Instruction C C
+programFromInputProgram :: InputProgram -> (Graph Instruction C C, Label)
 programFromInputProgram (InputProgram (Vector.toList -> instructions))
-  = foldl' (|*><*|) emptyClosedGraph (blockify instructions)
+  = ( foldl' (|*><*|) emptyClosedGraph $ blockify instructions
+    , instructionLabel $ head instructions
+    )
   where
   blockify is@(i : _) = let
     initial = ILabel $ instructionLabel i
@@ -331,18 +339,119 @@ data Instruction e x where
   IReturn :: Register -> Instruction O C
   ISet :: Register -> Constant -> Instruction O O
 
-data IrProgram = IrProgram
-  { programEntry :: Label
-  , programBody :: Graph Instruction C C
-  }
+instance Show (Instruction e x) where
+  show = \case
+    ILabel label -> show label ++ ":"
+    IAdd a b c -> '\t' : unwords [show a, ":=", show b, "+", show c]
+    ICall a _ b next -> '\t' : unwords [show b, ":=", show a, ";", show next]
+    IEquals a b c -> '\t' : unwords [show a, ":=", show b, "=", show c]
+    IJump label -> '\t' : unwords ["jump", show label]
+    IJumpIfZero a t f -> '\t' : unwords ["if", show a, "= 0 then", show t, "else", show f]
+    ILessThan a b c -> '\t' : unwords [show a, ":=", show b, "<", show c]
+    IMove a b -> '\t' : unwords [show a, ":=", show b]
+    IMultiply a b c -> '\t' : unwords [show a, ":=", show b, "*", show c]
+    INegate a b -> '\t' : unwords [show a, ":= -", show b]
+    INot a b -> '\t' : unwords [show a, ":= not", show b]
+    IReturn a -> '\t' : unwords ["ret", show a]
+    ISet a b -> '\t' : unwords [show a, ":=", show b]
 
 instance NonLocal Instruction where
   entryLabel (ILabel l) = l
   successors = \case
-    ICall _ _ _ l -> [l]
+    ICall l _ _ n -> [l, n]
     IJump l -> [l]
     IJumpIfZero _ t f -> [t, f]
     IReturn{} -> []
+
+instructionRegisters :: Instruction e x -> Set Register
+instructionRegisters = \case
+  ILabel{} -> Set.empty
+  IAdd a b c -> Set.fromList [a, b, c]
+  ICall _ _ a _ -> Set.singleton a
+  IEquals a b c -> Set.fromList [a, b, c]
+  IJump _ -> Set.empty
+  IJumpIfZero a _ _ -> Set.singleton a
+  ILessThan a b c -> Set.fromList [a, b, c]
+  IMove a b -> Set.fromList [a, b]
+  IMultiply a b c -> Set.fromList [a, b, c]
+  INegate a b -> Set.fromList [a, b]
+  INot a b -> Set.fromList [a, b]
+  IReturn a -> Set.singleton a
+  ISet a _ -> Set.singleton a
+
+optimize :: Label -> Graph Instruction C C -> Graph Instruction C C
+optimize entry program = runSimpleUniqueMonad . runWithFuel infiniteFuel . (id :: SimpleFuelMonad a -> SimpleFuelMonad a) $ do
+  (rewritten, _, _) <- analyzeAndRewriteBwd livenessPass (JustC entry) program noFacts
+  return rewritten
+  where
+
+  livenessPass :: (FuelMonad m) => BwdPass m Instruction (Set Register)
+  livenessPass = BwdPass
+    { bp_lattice = livenessLattice
+    , bp_transfer = livenessTransfer
+    , bp_rewrite = livenessRewrite
+    }
+
+  livenessTransfer :: BwdTransfer Instruction (Set Register)
+  livenessTransfer = mkBTransfer3
+    livenessAnalysisInitial
+    livenessAnalysisMedial
+    livenessAnalysisFinal
+
+  livenessAnalysisInitial :: Instruction C O -> Set Register -> Set Register
+  livenessAnalysisInitial ILabel{} facts = facts
+
+  -- A register is not alive before an assignment, so target registers are
+  -- always omitted from the fact base before proceeding.
+  livenessAnalysisMedial :: Instruction O O -> Set Register -> Set Register
+  livenessAnalysisMedial instruction facts = case instruction of
+    IAdd out _ _ -> addUsesBut out
+    IEquals out _ _ -> addUsesBut out
+    ILessThan out _ _ -> addUsesBut out
+    IMove out _ -> addUsesBut out
+    IMultiply out _ _ -> addUsesBut out
+    INegate out _ -> addUsesBut out
+    INot out _ -> addUsesBut out
+    ISet out _ -> addUsesBut out
+    where addUsesBut x = addUses (Set.delete x facts) instruction
+
+  livenessAnalysisFinal :: Instruction O C -> FactBase (Set Register) -> (Set Register)
+  livenessAnalysisFinal instruction facts = case instruction of
+    IJump label -> addUses (fact facts label) instruction
+    IJumpIfZero _ true false
+      -> addUses (fact facts true <> fact facts false) instruction
+    ICall _ _ out label -> addUses (Set.delete out (fact facts label)) instruction
+    IReturn _ -> addUses (fact_bot livenessLattice) instruction
+
+  livenessLattice = DataflowLattice
+    { fact_name = "live registers"
+    , fact_bot = Set.empty
+    , fact_join = \_ (OldFact old) (NewFact new) -> let
+      change = changeIf (Set.size join > Set.size old)
+      join = old <> new
+      in (change, join)
+    }
+
+  livenessRewrite :: (FuelMonad m) => BwdRewrite m Instruction (Set Register)
+  livenessRewrite = mkBRewrite3
+    livenessRewriteInitial
+    livenessRewriteMedial
+    livenessRewriteFinal
+
+  livenessRewriteInitial :: (FuelMonad m) => n C O -> f -> m (Maybe (Graph n C O))
+  livenessRewriteInitial _node _facts = return Nothing
+
+  livenessRewriteMedial :: (FuelMonad m) => n O O -> f -> m (Maybe (Graph n O O))
+  livenessRewriteMedial _node _facts = return Nothing
+
+  livenessRewriteFinal :: (FuelMonad m) => n O C -> FactBase f -> m (Maybe (Graph n O C))
+  livenessRewriteFinal _node _facts = return Nothing
+
+  fact :: FactBase (Set a) -> Label -> Set a
+  fact facts label = fromMaybe Set.empty $ lookupFact label facts
+
+  addUses :: Set Register -> Instruction e x -> Set Register
+  addUses to = (<> to) . instructionRegisters
 
 --------------------------------------------------------------------------------
 -- Miscellany

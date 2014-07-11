@@ -1,0 +1,17 @@
+name: virtual-machine
+version: 0.1.0.0
+author: Jon Purdy
+maintainer: evincarofautumn@gmail.com
+build-type: Simple
+cabal-version: >=1.8
+executable virtual-machine
+  main-is: Main.hs
+  ghc-options: -Wall -Werror -O2
+  build-depends:
+    base == 4.6.*,
+    hoopl == 3.8.*,
+    transformers == 0.3.*,
+    containers == 0.5.*,
+    vector == 0.10.*,
+    parsec == 3.1.*,
+    text == 0.11.*
