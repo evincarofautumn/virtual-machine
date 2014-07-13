@@ -343,7 +343,7 @@ instance Show (Instruction e x) where
   show = \case
     ILabel label -> show label ++ ":"
     IAdd a b c -> '\t' : unwords [show a, ":=", show b, "+", show c]
-    ICall a _ b next -> '\t' : unwords [show b, ":=", show a, ";", show next]
+    ICall a _ b next -> '\t' : unwords [show b, ":= call", show a, "then", show next]
     IEquals a b c -> '\t' : unwords [show a, ":=", show b, "=", show c]
     IJump label -> '\t' : unwords ["jump", show label]
     IJumpIfZero a t f -> '\t' : unwords ["if", show a, "= 0 then", show t, "else", show f]
