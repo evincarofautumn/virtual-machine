@@ -57,14 +57,14 @@ main = do
       file <- Lazy.readFile filename `catch` missing
       case parseProgram filename file of
         (_, Left message) -> hPrint stderr message >> exitFailure
-        (_idMap, Right inputProgram) -> do
+        (idMap, Right inputProgram) -> do
           let (program, entry) = programFromInputProgram inputProgram
           putStrLn "Input: "
           putStrLn $ showGraph show program
           let optimized = optimize entry program
           putStrLn "\nOptimized: "
           putStrLn $ showGraph show optimized
-          result <- run inputProgram $ Vector.fromList (map read rawMachineArgs)
+          result <- run optimized idMap $ Vector.fromList (map read rawMachineArgs)
           print result
       where
       missing e = if isDoesNotExistError e
@@ -139,7 +139,8 @@ newtype InputProgram = InputProgram { inputInstructions :: Vector InputInstructi
 type Cell = Int64
 
 parseProgram :: SourceName -> Lazy.Text -> (IdMap, Either ParseError InputProgram)
-parseProgram filename file = runSimpleUniqueMonad . runIdMap $ runParserT program () filename file
+parseProgram filename file = runSimpleUniqueMonad . runIdMap
+  $ runParserT program () filename file
   where
   program = InputProgram . Vector.fromList -- . concat
     <$> ((statement `sepEndBy` many1 newline) <* eof)
@@ -189,8 +190,9 @@ parseProgram filename file = runSimpleUniqueMonad . runIdMap $ runParserT progra
   horizontal = oneOf " \t"
   horizontals = many horizontal
 
-run :: InputProgram -> Vector Cell -> IO Cell
-run (InputProgram instructions) machineArguments = do
+run :: Graph Instruction C C -> IdMap -> Vector Cell -> IO Cell
+run graph labels machineArguments = do
+  let InputProgram instructions = flatten graph labels
   cs <- Mutable.new callStackSize
   vs <- Unboxed.new valueStackSize
   csp <- newIORef (0 :: Int)
@@ -268,7 +270,6 @@ run (InputProgram instructions) machineArguments = do
   where
   callStackSize = (2::Int) ^ (12::Int)
   valueStackSize = (2::Int) ^ (20::Int)
-  (.:) = (.) . (.)
 
 data Action
   = Proceed
@@ -454,6 +455,35 @@ optimize entry program = runSimpleUniqueMonad . runWithFuel infiniteFuel . (id :
   addUses to = (<> to) . instructionRegisters
 
 --------------------------------------------------------------------------------
+-- Flattening graphs back into executable instructions
+
+flatten :: Graph Instruction C C -> IdMap -> InputProgram
+flatten graph labels = InputProgram . Vector.fromList
+  $ foldGraphNodes (flip addNode) graph []
+  where
+  -- Invariant: every target address in the input program has had a
+  -- corresponding label generated.
+  labels' = invertIdMap labels
+  targetForLabel = (labels' Map.!)
+  addNode :: [InputInstruction] -> Instruction e x -> [InputInstruction]
+  addNode acc = ($ acc) . \case
+    ILabel{} -> id
+    IAdd out left right -> (Add out left right :)
+    ICall target depth out next
+      -> (Call (targetForLabel target) depth out (targetForLabel next) :)
+    IEquals out left right -> (Equals out left right :)
+    IJump target -> (Jump (targetForLabel target) :)
+    IJumpIfZero register true false
+      -> (JumpIfZero register (targetForLabel true) (targetForLabel false) :)
+    ILessThan out left right -> (LessThan out left right :)
+    IMove out in_ -> (Move out in_ :)
+    IMultiply out left right -> (Multiply out left right :)
+    INegate out in_ -> (Negate out in_ :)
+    INot out in_ -> (Not out in_ :)
+    IReturn register -> (Return register :)
+    ISet register value -> (Set register value :)
+
+--------------------------------------------------------------------------------
 -- Miscellany
 
 bug :: String -> a
@@ -471,6 +501,8 @@ spanJust1 f l@(x : xs) = case f x of
   Nothing -> (Nothing, l)
   x'@Just{} -> (x', xs)
 spanJust1 _ [] = (Nothing, [])
+
+(.:) = (.) . (.)
 
 --------------------------------------------------------------------------------
 -- Source of unique labels
