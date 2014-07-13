@@ -462,8 +462,9 @@ bug = error
 spanJust :: (a -> Maybe b) -> [a] -> ([b], [a])
 spanJust f = go []
   where
-  go ys l@(x : xs) = maybe (ys, l) (\y -> go (y : ys) xs) (f x)
-  go ys [] = (ys, [])
+  -- These 'reverse's could be gotten rid of with a bit more cleverness.
+  go ys l@(x : xs) = maybe (reverse ys, l) (\y -> go (y : ys) xs) (f x)
+  go ys [] = (reverse ys, [])
 
 spanJust1 :: (a -> Maybe b) -> [a] -> (Maybe b, [a])
 spanJust1 f l@(x : xs) = case f x of
