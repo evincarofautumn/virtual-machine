@@ -4,9 +4,24 @@ author: Jon Purdy
 maintainer: evincarofautumn@gmail.com
 build-type: Simple
 cabal-version: >=1.8
+
+flag prof
+  description: Enable profiling
+  default: False
+
 executable virtual-machine
   main-is: Main.hs
-  ghc-options: -Wall -Werror -O2
+  ghc-options:
+    -Wall
+    -Werror
+    -O2
+
+  if flag(prof)
+    ghc-options:
+      -prof
+      -fprof-auto
+      -rtsopts
+
   build-depends:
     base == 4.6.*,
     hoopl == 3.8.*,

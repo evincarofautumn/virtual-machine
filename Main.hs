@@ -1,23 +1,28 @@
 {-#
   LANGUAGE OverloadedStrings
   , BangPatterns
+  , FlexibleContexts
+  , FlexibleInstances
   , GADTs
   , GeneralizedNewtypeDeriving
   , LambdaCase
   , NoMonomorphismRestriction
+  , PatternGuards
   , RecordWildCards
   , StandaloneDeriving
   , TypeFamilies
   , ViewPatterns
   #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Main where
 
 import Compiler.Hoopl hiding ((<*>))
 import Control.Applicative
-import Control.Arrow (first)
 import Control.Exception hiding (try)
+import Control.Monad
 import Control.Monad.Trans.Class
+import Control.Monad.Trans.State
 import Data.Function
 import Data.IORef
 import Data.Int
@@ -29,10 +34,10 @@ import Data.Monoid
 import Data.Set (Set)
 import Data.Vector (Vector)
 import System.Environment
-import System.Exit
-import System.IO
+-- import System.Exit
+-- import System.IO
 import System.IO.Error
-import Text.Parsec hiding (State, (<|>), label, many)
+import Text.Parsec hiding (State, (<|>), label, labels, many)
 import Text.Parsec.Text.Lazy ()
 
 import qualified Compiler.Hoopl as Hoopl
@@ -45,6 +50,8 @@ import qualified Data.Vector as Vector
 import qualified Data.Vector.Mutable as Mutable
 import qualified Data.Vector.Unboxed.Mutable as Unboxed
 
+import Debug.Trace
+
 --------------------------------------------------------------------------------
 -- Entry point
 
@@ -55,17 +62,20 @@ main = do
     [] -> bug "System.IndexOutOfRangeException: Array index is out of range."
     filename : rawMachineArgs -> do
       file <- Lazy.readFile filename `catch` missing
-      case parseProgram filename file of
-        (_, Left message) -> hPrint stderr message >> exitFailure
-        (idMap, Right inputProgram) -> do
-          let (program, entry) = programFromInputProgram inputProgram
-          putStrLn "Input: "
-          putStrLn $ showGraph show program
-          let optimized = optimize entry program
-          putStrLn "\nOptimized: "
-          putStrLn $ showGraph show optimized
-          result <- run optimized idMap $ Vector.fromList (map read rawMachineArgs)
-          print result
+      (optimized, entry) <- return . runSimpleUniqueMonad $ do
+        parsed <- parseProgram filename file
+        case parsed of
+          (_, Left message) -> error $ show message  -- hPrint stderr message >> exitFailure
+          (_idMap, Right inputProgram) -> do
+            (program, entry) <- programFromInputProgram inputProgram
+            !_ <- trace "Input: " (return ())
+            !_ <- trace (showGraph show program) (return ())
+            optimized <- optimize entry program
+            !_ <- trace ("\nOptimized: ") (return ())
+            !_ <- trace (showGraph show optimized) (return ())
+            return (optimized, entry)
+      result <- run entry optimized $ Vector.fromList (map read rawMachineArgs)
+      print result
       where
       missing e = if isDoesNotExistError e
         then bug $ concat
@@ -80,37 +90,30 @@ main = do
 
 -- | An instruction in the input program.
 data InputInstruction
-  = Add Label Register Register Register
-  | Call Label LabelledTarget Depth Register LabelledTarget
-  | Equals Label Register Register Register
-  | Jump Label LabelledTarget
-  | JumpIfZero Label Register LabelledTarget LabelledTarget
-  | LessThan Label Register Register Register
-  | Move Label Register Register
-  | Multiply Label Register Register Register
-  | Negate Label Register Register
-  | Not Label Register Register
-  | Return Label Register
-  | Set Label Register Constant
+  = Add !Register !Register !Register
+  | Call {-lazy-}(Labelled Target) !Depth !Register {-lazy-}(Labelled Target)
+  | Equals !Register !Register !Register
+  | Jump {-lazy-}(Labelled Target)
+  | JumpIfZero !Register {-lazy-}(Labelled Target) {-lazy-}(Labelled Target)
+  | LessThan !Register !Register !Register
+  | Move !Register !Register
+  | Multiply !Register !Register !Register
+  | Negate !Register !Register
+  | Not !Register !Register
+  | Return !Register
+  | Set !Register !Constant
   deriving (Show)
 
-instructionLabel :: InputInstruction -> Label
-instructionLabel = \case
-  Add l _ _ _ -> l
-  Call l _ _ _ _ -> l
-  Equals l _ _ _ -> l
-  Jump l _ -> l
-  JumpIfZero l _ _ _ -> l
-  LessThan l _ _ _ -> l
-  Move l _ _ -> l
-  Multiply l _ _ _ -> l
-  Negate l _ _ -> l
-  Not l _ _ -> l
-  Return l _ -> l
-  Set l _ _ -> l
+inputSuccessors :: InputInstruction -> Set Label
+inputSuccessors = \case
+  Call (Labelled l _) _ _ (Labelled n _) -> Set.fromList [l, n]
+  Jump (Labelled l _) -> Set.singleton l
+  JumpIfZero _ (Labelled t _) (Labelled f _) -> Set.fromList [t, f]
+  Return{} -> Set.empty
+  _ -> Set.empty
 
-data LabelledTarget = LabelledTarget Label Target
-  deriving (Show)
+data Labelled a = Labelled { labelledLabel :: !Label, labelledValue :: !a }
+  deriving (Eq, Ord, Show)
 
 -- | A constant integer in the input program.
 newtype Constant = Constant Cell
@@ -124,7 +127,7 @@ newtype Depth = Depth Int
 
 -- | A jump target in the input program.
 newtype Target = Target Int
-  deriving (Enum, Show)
+  deriving (Enum, Eq, Ord, Show)
 
 -- | A register name.
 newtype Register = Register Int
@@ -133,13 +136,17 @@ newtype Register = Register Int
 instance Show Register where
   show (Register r) = '$' : show r
 
-newtype InputProgram = InputProgram { inputInstructions :: Vector InputInstruction }
+newtype InputProgram = InputProgram
+  { inputInstructions :: Vector (Labelled InputInstruction) }
   deriving (Show)
 
 type Cell = Int64
 
-parseProgram :: SourceName -> Lazy.Text -> (IdMap, Either ParseError InputProgram)
-parseProgram filename file = runSimpleUniqueMonad . runIdMap
+parseProgram
+  :: SourceName
+  -> Lazy.Text
+  -> SimpleUniqueMonad (IdMap, Either ParseError InputProgram)
+parseProgram filename file = runIdMap
   $ runParserT program () filename file
   where
   program = InputProgram . Vector.fromList -- . concat
@@ -148,30 +155,30 @@ parseProgram filename file = runSimpleUniqueMonad . runIdMap
   instruction pc = do
     current <- lift $ labelForTarget pc
     next <- let pc' = succ pc
-      in LabelledTarget <$> lift (labelForTarget pc') <*> pure pc'
-    medial current <|> final current next
+      in Labelled <$> lift (labelForTarget pc') <*> pure pc'
+    Labelled current <$> (medial <|> final next)
     where
-    medial current = choice
-      [ Add current <$ word "Add" <*> registerComma <*> registerComma <*> register
-      , register3 (word "Equals") (Equals current)
-      , register3 (word "LessThan") (LessThan current)
-      , try $ register2 (word "Move") (Move current)
-      , register3 (word "Multiply") (Multiply current)
-      , try $ register2 (word "Negate") (Negate current)
-      , register2 (word "Not") (Not current)
-      , Set current <$ word "Set" <*> registerComma <*> constant
+    medial = choice
+      [ Add <$ word "Add" <*> registerComma <*> registerComma <*> register
+      , register3 (word "Equals") Equals
+      , register3 (word "LessThan") LessThan
+      , try $ register2 (word "Move") Move
+      , register3 (word "Multiply") Multiply
+      , try $ register2 (word "Negate") Negate
+      , register2 (word "Not") Not
+      , Set <$ word "Set" <*> registerComma <*> constant
       ]
-    final current next = choice
-      [ Call current <$ word "Call"
+    final next = choice
+      [ Call <$ word "Call"
         <*> (label <* comma) <*> (depth <* comma) <*> register <*> pure next
-      , try $ Jump current <$ word "Jump" <*> label
-      , JumpIfZero current <$ word "JumpIfZero"
+      , try $ Jump <$ word "Jump" <*> label
+      , JumpIfZero <$ word "JumpIfZero"
         <*> registerComma <*> label <*> pure next
-      , Return current <$ word "Return" <*> register
+      , Return <$ word "Return" <*> register
       ]
     label = do
       t <- target
-      LabelledTarget <$> lift (labelForTarget t) <*> pure t
+      Labelled <$> lift (labelForTarget t) <*> pure t
   digits = lexeme (many1 digit) <?> "number"
   target = Target <$> unsigned <?> "jump target"
   unsigned = read <$> digits
@@ -190,14 +197,18 @@ parseProgram filename file = runSimpleUniqueMonad . runIdMap
   horizontal = oneOf " \t"
   horizontals = many horizontal
 
-run :: Graph Instruction C C -> IdMap -> Vector Cell -> IO Cell
-run graph labels machineArguments = do
-  let InputProgram instructions = flatten graph labels
+run :: Label -> Graph Instruction C C -> Vector Cell -> IO Cell
+run entry graph machineArguments = do
+  let (Target entry', instructions) = flatten entry graph
+  putStrLn "Flattened:"
+  mapM_ (\ (l, i) -> do putStr (show l ++ ": "); print i)
+    . zip [(0::Int)..] $ Vector.toList instructions
+
   cs <- Mutable.new callStackSize
   vs <- Unboxed.new valueStackSize
   csp <- newIORef (0 :: Int)
   vsp <- newIORef (0 :: Int)
-  pc <- newIORef (0 :: Int)
+  pc <- newIORef entry'
 
   let
     pushValue value = do
@@ -239,28 +250,28 @@ run graph labels machineArguments = do
     instruction <- (instructions Vector.!) <$> readIORef pc
 
     action <- case instruction of
-      Add _ out left right -> binary (+) out left right >> proceed
-      Call _ (LabelledTarget _ target) depth result (LabelledTarget _ next) -> do
+      Add out left right -> binary (+) out left right >> proceed
+      Call (Labelled _ target) depth result (Labelled _ next) -> do
         enter $ StackFrame next depth result
         jump target
-      Equals _ out left right -> binary (bool .: (==)) out left right >> proceed
-      Jump _ (LabelledTarget _ target) -> jump target
-      JumpIfZero _ register (LabelledTarget _ target) (LabelledTarget _ next) -> do
+      Equals out left right -> binary (bool .: (==)) out left right >> proceed
+      Jump (Labelled _ target) -> jump target
+      JumpIfZero register (Labelled _ target) (Labelled _ next) -> do
         value <- readRegister register
         if value == 0 then jump target else jump next
-      LessThan _ out left right -> binary (bool .: (<)) out left right >> proceed
-      Move _ out in_ -> unary id out in_ >> proceed
-      Multiply _ out left right -> binary (*) out left right >> proceed
-      Negate _ out in_ -> unary negate out in_ >> proceed
-      Not _ out in_ -> unary (bool . (== 0)) out in_ >> proceed
-      Return _ result -> do
+      LessThan out left right -> binary (bool .: (<)) out left right >> proceed
+      Move out in_ -> unary id out in_ >> proceed
+      Multiply out left right -> binary (*) out left right >> proceed
+      Negate out in_ -> unary negate out in_ >> proceed
+      Not out in_ -> unary (bool . (== 0)) out in_ >> proceed
+      Return result -> do
         csp' <- pred <$> readIORef csp
         result' <- readRegister result
         if csp' < 0 then halt result' else do
           StackFrame next _ out <- leave
           writeRegister out result'
           jump next
-      Set _ register (Constant constant) -> writeRegister register constant >> proceed
+      Set register (Constant constant) -> writeRegister register constant >> proceed
 
     case action of
       Proceed -> modifyIORef' pc succ >> loop
@@ -284,40 +295,57 @@ data StackFrame = StackFrame Target Depth Register
 data Indexed a = Indexed { indexOf :: !Int, indexValue :: !a }
   deriving (Show)
 
-programFromInputProgram :: InputProgram -> (Graph Instruction C C, Label)
-programFromInputProgram (InputProgram (Vector.toList -> instructions))
-  = ( foldl' (|*><*|) emptyClosedGraph $ blockify instructions
-    , instructionLabel $ head instructions
+programFromInputProgram
+  :: InputProgram
+  -> SimpleUniqueMonad (Graph Instruction C C, Label)
+programFromInputProgram (InputProgram (Vector.toList -> instructions)) = do
+  blockified <- flip evalStateT usedLabels $ blockify instructions
+  return
+    ( foldl' (|*><*|) emptyClosedGraph blockified
+    , labelledLabel $ head instructions
     )
   where
-  blockify is@(i : _) = let
-    initial = ILabel $ instructionLabel i
-    (medials, is') = spanJust toMedial is
-    (final, is'') = first
-      (fromMaybe (error "Missing final instruction in basic block."))
-      (spanJust1 toFinal is')
-    in (mkFirst initial Hoopl.<*> mkMiddles medials Hoopl.<*> mkLast final)
-      : blockify is''
-  blockify [] = []
+  usedLabels = mconcatMap (inputSuccessors . labelledValue) instructions
 
-  toMedial = \case
-    Add _ out left right -> Just $ IAdd out left right
-    Equals _ out left right -> Just $ IEquals out left right
-    LessThan _ out left right -> Just $ ILessThan out left right
-    Move _ out in_ -> Just $ IMove out in_
-    Multiply _ out left right -> Just $ IMultiply out left right
-    Negate _ out in_ -> Just $ INegate out in_
-    Not _ out in_ -> Just $ INot out in_
-    Set _ register constant -> Just $ ISet register constant
-    _ -> Nothing
+  blockify
+    :: [Labelled InputInstruction]
+    -> StateT (Set Label) SimpleUniqueMonad [Graph Instruction C C]
+  blockify is@(i : _) = do
+    (medials, is') <- spanJustM toMedial is
+    let (mFinal, is'') = spanJust1 toFinal is'
+    (initial, final, is''') <- case mFinal of
+      Just explicitFinal -> do
+        implicitLabel <- liftM ILabel freshLabel
+        return (implicitLabel, explicitFinal, is'')
+      Nothing -> case is'' of
+        next : rest -> return
+          (ILabel $ labelledLabel i, IJump $ labelledLabel next, next : rest)
+        [] -> error "Missing final instruction in basic block."
+    liftM ((mkFirst initial Hoopl.<*> mkMiddles medials Hoopl.<*> mkLast final) :)
+      $ blockify is'''
+  blockify [] = return []
 
-  toFinal = \case
-    Call _ (LabelledTarget target _) depth register (LabelledTarget next _)
+  toMedial (Labelled label instruction)
+    = gets (Set.member label) >>= \used -> if used
+      then modify (Set.delete label) >> return Nothing
+      else return $ case instruction of
+        Add out left right -> Just $ IAdd out left right
+        Equals out left right -> Just $ IEquals out left right
+        LessThan out left right -> Just $ ILessThan out left right
+        Move out in_ -> Just $ IMove out in_
+        Multiply out left right -> Just $ IMultiply out left right
+        Negate out in_ -> Just $ INegate out in_
+        Not out in_ -> Just $ INot out in_
+        Set register constant -> Just $ ISet register constant
+        _ -> Nothing
+
+  toFinal (Labelled _ instruction) = case instruction of
+    Call (Labelled target _) depth register (Labelled next _)
       -> Just $ ICall target depth register next
-    Jump _ (LabelledTarget target _) -> Just $ IJump target
-    JumpIfZero _ register (LabelledTarget target _) (LabelledTarget next _)
+    Jump (Labelled target _) -> Just $ IJump target
+    JumpIfZero register (Labelled target _) (Labelled next _)
       -> Just $ IJumpIfZero register target next
-    Return _ register -> Just $ IReturn register
+    Return register -> Just $ IReturn register
     _ -> Nothing
 
 -- | An instruction in the intermediate representation, indexed by openness at
@@ -380,11 +408,16 @@ instructionRegisters = \case
   IReturn a -> Set.singleton a
   ISet a _ -> Set.singleton a
 
-optimize :: Label -> Graph Instruction C C -> Graph Instruction C C
-optimize entry program = runSimpleUniqueMonad . runWithFuel infiniteFuel . (id :: SimpleFuelMonad a -> SimpleFuelMonad a) $ do
-  (rewritten, _, _) <- analyzeAndRewriteBwd livenessPass (JustC entry) program noFacts
-  return rewritten
+optimize
+  :: Label
+  -> Graph Instruction C C
+  -> SimpleUniqueMonad (Graph Instruction C C)
+optimize entry program = runWithFuel infiniteFuel rewrite
   where
+  rewrite :: SimpleFuelMonad (Graph Instruction C C)
+  rewrite = do
+    (rewritten, _, _) <- analyzeAndRewriteBwd livenessPass (JustC entry) program noFacts
+    return rewritten
 
   livenessPass :: (FuelMonad m) => BwdPass m Instruction (Set Register)
   livenessPass = BwdPass
@@ -428,9 +461,9 @@ optimize entry program = runSimpleUniqueMonad . runWithFuel infiniteFuel . (id :
     { fact_name = "live registers"
     , fact_bot = Set.empty
     , fact_join = \_ (OldFact old) (NewFact new) -> let
-      change = changeIf (Set.size join > Set.size old)
-      join = old <> new
-      in (change, join)
+      factChange = changeIf (Set.size factJoin > Set.size old)
+      factJoin = old <> new
+      in (factChange, factJoin)
     }
 
   livenessRewrite :: (FuelMonad m) => BwdRewrite m Instruction (Set Register)
@@ -457,31 +490,43 @@ optimize entry program = runSimpleUniqueMonad . runWithFuel infiniteFuel . (id :
 --------------------------------------------------------------------------------
 -- Flattening graphs back into executable instructions
 
-flatten :: Graph Instruction C C -> IdMap -> InputProgram
-flatten graph labels = InputProgram . Vector.fromList
-  $ foldGraphNodes (flip addNode) graph []
+flatten :: Label -> Graph Instruction C C -> (Target, Vector InputInstruction)
+flatten entry graph =
+  ( labelledValue $ targetForLabel entry
+  , Vector.reverse $ Vector.fromList finalInstructions
+  )
   where
-  -- Invariant: every target address in the input program has had a
-  -- corresponding label generated.
-  labels' = invertIdMap labels
-  targetForLabel = (labels' Map.!)
-  addNode :: [InputInstruction] -> Instruction e x -> [InputInstruction]
-  addNode acc = ($ acc) . \case
-    ILabel{} -> id
-    IAdd out left right -> (Add out left right :)
-    ICall target depth out next
-      -> (Call (targetForLabel target) depth out (targetForLabel next) :)
-    IEquals out left right -> (Equals out left right :)
-    IJump target -> (Jump (targetForLabel target) :)
-    IJumpIfZero register true false
-      -> (JumpIfZero register (targetForLabel true) (targetForLabel false) :)
-    ILessThan out left right -> (LessThan out left right :)
-    IMove out in_ -> (Move out in_ :)
-    IMultiply out left right -> (Multiply out left right :)
-    INegate out in_ -> (Negate out in_ :)
-    INot out in_ -> (Not out in_ :)
-    IReturn register -> (Return register :)
-    ISet register value -> (Set register value :)
+  (finalLabels, finalInstructions)
+    = foldGraphNodes addNode graph (Map.empty, [])
+
+  targetForLabel :: Label -> Labelled Target
+  targetForLabel label = Labelled label $ Target
+    $ case Map.lookup label finalLabels of
+      Nothing -> error $ unwords ["Missing target for label", show label]
+      Just target -> target
+
+  addNode
+    :: Instruction e x
+    -> (Map Label Int, [InputInstruction])
+    -> (Map Label Int, [InputInstruction])
+  addNode i (labels, is) = case i of
+    ILabel label -> (Map.insert label (length is) labels, is)
+    IAdd out left right -> instruction $ Add out left right
+    ICall target depth out next -> instruction
+      $ Call (targetForLabel target) depth out (targetForLabel next)
+    IEquals out left right -> instruction $ Equals out left right
+    IJump target -> instruction $ Jump (targetForLabel target)
+    IJumpIfZero register true false -> instruction
+      $ JumpIfZero register (targetForLabel true) (targetForLabel false)
+    ILessThan out left right -> instruction $ LessThan out left right
+    IMove out in_ -> instruction $ Move out in_
+    IMultiply out left right -> instruction $ Multiply out left right
+    INegate out in_ -> instruction $ Negate out in_
+    INot out in_ -> instruction $ Not out in_
+    IReturn register -> instruction $ Return register
+    ISet register value -> instruction $ Set register value
+    where
+    instruction x = (labels, x : is)
 
 --------------------------------------------------------------------------------
 -- Miscellany
@@ -489,12 +534,20 @@ flatten graph labels = InputProgram . Vector.fromList
 bug :: String -> a
 bug = error
 
-spanJust :: (a -> Maybe b) -> [a] -> ([b], [a])
-spanJust f = go []
+mconcatMap :: (Monoid b) => (a -> b) -> [a] -> b
+mconcatMap = mconcat .: map
+
+spanJustM :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m ([b], [a])
+spanJustM f = go []
   where
   -- These 'reverse's could be gotten rid of with a bit more cleverness.
-  go ys l@(x : xs) = maybe (reverse ys, l) (\y -> go (y : ys) xs) (f x)
-  go ys [] = (reverse ys, [])
+  go ys l = case l of
+    x : xs -> do
+      my <- f x
+      case my of
+        Just y -> go (y : ys) xs
+        Nothing -> return (reverse ys, l)
+    [] -> return (reverse ys, l)
 
 spanJust1 :: (a -> Maybe b) -> [a] -> (Maybe b, [a])
 spanJust1 f l@(x : xs) = case f x of
@@ -502,7 +555,11 @@ spanJust1 f l@(x : xs) = case f x of
   x'@Just{} -> (x', xs)
 spanJust1 _ [] = (Nothing, [])
 
+(.:) :: (c -> d) -> (a -> b -> c) -> a -> b -> d
 (.:) = (.) . (.)
+
+instance (UniqueMonad m) => UniqueMonad (StateT s m) where
+  freshUnique = lift freshUnique
 
 --------------------------------------------------------------------------------
 -- Source of unique labels
