@@ -1,5 +1,6 @@
 {-#
   LANGUAGE GADTs
+  , ScopedTypeVariables
   #-}
 
 module Optimize.Liveness
@@ -18,37 +19,44 @@ import Types
 
 type LiveSet = Set Register
 
+-- | Performs liveness analysis and eliminates dead assignments.
 pass :: (FuelMonad m) => BwdPass m Node LiveSet
 pass = BwdPass
   { bp_lattice = lattice, bp_transfer = transfer, bp_rewrite = rewrite }
 
 transfer :: BwdTransfer Node LiveSet
-transfer = mkBTransfer3 analysisInitial analysisMedial analysisFinal
+transfer = mkBTransfer3 initial medial final
+  where
+  initial :: Node C O -> LiveSet -> LiveSet
+  initial NLabel{} facts = facts
 
-analysisInitial :: Node C O -> LiveSet -> LiveSet
-analysisInitial NLabel{} facts = facts
+  -- A register is not alive before an assignment, so destination registers are
+  -- always omitted from the fact base before proceeding.
+  medial :: Node O O -> LiveSet -> LiveSet
+  medial instruction facts = case instruction of
+    NAdd out _ _ -> addUsesBut out
+    NEquals out _ _ -> addUsesBut out
+    NLessThan out _ _ -> addUsesBut out
+    NMove out _ -> addUsesBut out
+    NMultiply out _ _ -> addUsesBut out
+    NNegate out _ -> addUsesBut out
+    NNot out _ -> addUsesBut out
+    NSet out _ -> addUsesBut out
+    where addUsesBut x = addUses (Set.delete x facts) instruction
 
--- A register is not alive before an assignment, so target registers are
--- always omitted from the fact base before proceeding.
-analysisMedial :: Node O O -> LiveSet -> LiveSet
-analysisMedial instruction facts = case instruction of
-  NAdd out _ _ -> addUsesBut out
-  NEquals out _ _ -> addUsesBut out
-  NLessThan out _ _ -> addUsesBut out
-  NMove out _ -> addUsesBut out
-  NMultiply out _ _ -> addUsesBut out
-  NNegate out _ -> addUsesBut out
-  NNot out _ -> addUsesBut out
-  NSet out _ -> addUsesBut out
-  where addUsesBut x = addUses (Set.delete x facts) instruction
-
-analysisFinal :: Node O C -> FactBase LiveSet -> LiveSet
-analysisFinal instruction facts = case instruction of
-  NJump label -> addUses (fact facts label) instruction
-  NJumpIfZero _ true false
-    -> addUses (fact facts true <> fact facts false) instruction
-  NCall _ _ out label -> addUses (Set.delete out (fact facts label)) instruction
-  NReturn _ -> addUses (fact_bot lattice) instruction
+  final :: Node O C -> FactBase LiveSet -> LiveSet
+  final instruction facts = case instruction of
+    NJump label -> addUses (facts `about` label) instruction
+    NJumpIfZero _ true false
+      -> addUses (facts `about` true <> facts `about` false) instruction
+    NCall _ (Depth depth) out label
+      -> addUses (arguments <> Set.delete out (facts `about` label)) instruction
+      where
+      -- We don't know which arguments the called procedure will use, so we
+      -- conservatively assume it can use any of them, and that they are all
+      -- therefore live at the point of the call.
+      arguments = Set.fromList $ map Register [0 .. pred depth]
+    NReturn _ -> addUses (fact_bot lattice) instruction
 
 lattice :: DataflowLattice LiveSet
 lattice = DataflowLattice
@@ -60,20 +68,30 @@ lattice = DataflowLattice
     in (factChange, factJoin)
   }
 
-rewrite :: (FuelMonad m) => BwdRewrite m Node LiveSet
-rewrite = mkBRewrite3 rewriteInitial rewriteMedial rewriteFinal
+rewrite :: forall m. (FuelMonad m) => BwdRewrite m Node LiveSet
+rewrite = mkBRewrite3 initial medial final
+  where
+  initial :: Node C O -> LiveSet -> m (Maybe (Graph Node C O))
+  initial _node _facts = return Nothing
 
-rewriteInitial :: (FuelMonad m) => n C O -> f -> m (Maybe (Graph n C O))
-rewriteInitial _node _facts = return Nothing
+  medial :: Node O O -> LiveSet -> m (Maybe (Graph Node O O))
+  medial instruction facts = return $ case instruction of
+    NAdd out _ _ | dead out -> Just emptyGraph
+    NEquals out _ _ | dead out -> Just emptyGraph
+    NLessThan out _ _ | dead out -> Just emptyGraph
+    NMove out _ | dead out -> Just emptyGraph
+    NMultiply out _ _ | dead out -> Just emptyGraph
+    NNegate out _ | dead out -> Just emptyGraph
+    NNot out _ | dead out -> Just emptyGraph
+    NSet out _ | dead out -> Just emptyGraph
+    _ -> Nothing
+    where dead = (`Set.notMember` facts)
 
-rewriteMedial :: (FuelMonad m) => n O O -> f -> m (Maybe (Graph n O O))
-rewriteMedial _node _facts = return Nothing
+  final :: Node O C -> FactBase LiveSet -> m (Maybe (Graph Node O C))
+  final _node _facts = return Nothing
 
-rewriteFinal :: (FuelMonad m) => n O C -> FactBase f -> m (Maybe (Graph n O C))
-rewriteFinal _node _facts = return Nothing
-
-fact :: FactBase (Set a) -> Label -> Set a
-fact facts label = fromMaybe Set.empty $ lookupFact label facts
+about :: FactBase (Set a) -> Label -> Set a
+facts `about` label = fromMaybe Set.empty $ lookupFact label facts
 
 addUses :: LiveSet -> Node e x -> LiveSet
 addUses to = (<> to) . registerSet
