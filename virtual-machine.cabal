@@ -10,7 +10,9 @@ flag prof
   default: False
 
 executable virtual-machine
+
   main-is: Main.hs
+
   ghc-options:
     -Wall
     -Werror
