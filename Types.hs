@@ -25,6 +25,7 @@ data Labelled a = Labelled { labelledLabel :: !Label, labelledValue :: !a }
 
 -- | A constant integer in the input program.
 newtype Constant = Constant Cell
+  deriving (Eq, Ord)
 
 instance Show Constant where
   show (Constant c) = show c

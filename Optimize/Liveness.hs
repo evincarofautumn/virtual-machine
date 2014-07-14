@@ -24,6 +24,16 @@ pass :: (FuelMonad m) => BwdPass m Node LiveSet
 pass = BwdPass
   { bp_lattice = lattice, bp_transfer = transfer, bp_rewrite = rewrite }
 
+lattice :: DataflowLattice LiveSet
+lattice = DataflowLattice
+  { fact_name = "live registers"
+  , fact_bot = Set.empty
+  , fact_join = \_ (OldFact old) (NewFact new) -> let
+    factChange = changeIf (Set.size factJoin > Set.size old)
+    factJoin = old <> new
+    in (factChange, factJoin)
+  }
+
 transfer :: BwdTransfer Node LiveSet
 transfer = mkBTransfer3 initial medial final
   where
@@ -57,16 +67,6 @@ transfer = mkBTransfer3 initial medial final
       -- therefore live at the point of the call.
       arguments = Set.fromList $ map Register [0 .. pred depth]
     NReturn _ -> addUses (fact_bot lattice) instruction
-
-lattice :: DataflowLattice LiveSet
-lattice = DataflowLattice
-  { fact_name = "live registers"
-  , fact_bot = Set.empty
-  , fact_join = \_ (OldFact old) (NewFact new) -> let
-    factChange = changeIf (Set.size factJoin > Set.size old)
-    factJoin = old <> new
-    in (factChange, factJoin)
-  }
 
 rewrite :: forall m. (FuelMonad m) => BwdRewrite m Node LiveSet
 rewrite = mkBRewrite3 initial medial final

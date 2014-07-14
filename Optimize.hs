@@ -6,6 +6,7 @@ import Compiler.Hoopl hiding ((<*>))
 
 import Node
 
+import qualified Optimize.ConstantFolding as ConstantFolding
 import qualified Optimize.Liveness as Liveness
 
 optimize
@@ -16,9 +17,9 @@ optimize entry program = runWithFuel infiniteFuel rewrite
   where
   rewrite :: SimpleFuelMonad (Graph Node C C)
   rewrite = do
-    (rewritten, _, _) <- analyzeAndRewriteBwd
-      Liveness.pass
-      (JustC entry)
-      program
-      noFacts
-    return rewritten
+    (program', _, _) <- analyzeAndRewriteFwd
+      ConstantFolding.pass (JustC [entry]) program
+      (ConstantFolding.initialFacts entry)
+    (program'', _, _) <- analyzeAndRewriteBwd
+      Liveness.pass (JustC [entry]) program' noFacts
+    return program''
