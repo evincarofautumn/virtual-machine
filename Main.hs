@@ -9,6 +9,7 @@
   , NoMonomorphismRestriction
   , PatternGuards
   , RecordWildCards
+  , ScopedTypeVariables
   , StandaloneDeriving
   , TypeFamilies
   , ViewPatterns
@@ -20,7 +21,6 @@ module Main where
 import Compiler.Hoopl hiding ((<*>))
 import Control.Applicative
 import Control.Exception hiding (try)
-import Control.Monad
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.State
 import Data.Function
@@ -34,8 +34,6 @@ import Data.Monoid
 import Data.Set (Set)
 import Data.Vector (Vector)
 import System.Environment
--- import System.Exit
--- import System.IO
 import System.IO.Error
 import Text.Parsec hiding (State, (<|>), label, labels, many)
 import Text.Parsec.Text.Lazy ()
@@ -67,7 +65,7 @@ main = do
         case parsed of
           (_, Left message) -> error $ show message  -- hPrint stderr message >> exitFailure
           (_idMap, Right inputProgram) -> do
-            (program, entry) <- programFromInputProgram inputProgram
+            let (program, entry) = programFromInputProgram inputProgram
             !_ <- trace "Input: " (return ())
             !_ <- trace (showGraph show program) (return ())
             optimized <- optimize entry program
@@ -149,7 +147,7 @@ parseProgram
 parseProgram filename file = runIdMap
   $ runParserT program () filename file
   where
-  program = InputProgram . Vector.fromList -- . concat
+  program = InputProgram . Vector.fromList
     <$> ((statement `sepEndBy` many1 newline) <* eof)
   statement = horizontals *> target >>= instruction
   instruction pc = do
@@ -295,49 +293,50 @@ data StackFrame = StackFrame Target Depth Register
 data Indexed a = Indexed { indexOf :: !Int, indexValue :: !a }
   deriving (Show)
 
-programFromInputProgram
-  :: InputProgram
-  -> SimpleUniqueMonad (Graph Instruction C C, Label)
-programFromInputProgram (InputProgram (Vector.toList -> instructions)) = do
-  blockified <- flip evalStateT usedLabels $ blockify instructions
-  return
-    ( foldl' (|*><*|) emptyClosedGraph blockified
-    , labelledLabel $ head instructions
-    )
+programFromInputProgram :: InputProgram -> (Graph Instruction C C, Label)
+programFromInputProgram (InputProgram (Vector.toList -> instructions)) =
+  ( foldl' (|*><*|) emptyClosedGraph blockified
+  , labelledLabel $ head instructions
+  )
   where
+  blockified = map (uncurry blockify)
+    . zip grouped
+    $ map (Just . labelledLabel . head) (tail grouped) ++ [Nothing]
+
   usedLabels = mconcatMap (inputSuccessors . labelledValue) instructions
 
-  blockify
-    :: [Labelled InputInstruction]
-    -> StateT (Set Label) SimpleUniqueMonad [Graph Instruction C C]
-  blockify is@(i : _) = do
-    (medials, is') <- spanJustM toMedial is
-    let (mFinal, is'') = spanJust1 toFinal is'
-    (initial, final, is''') <- case mFinal of
-      Just explicitFinal -> do
-        implicitLabel <- liftM ILabel freshLabel
-        return (implicitLabel, explicitFinal, is'')
-      Nothing -> case is'' of
-        next : rest -> return
-          (ILabel $ labelledLabel i, IJump $ labelledLabel next, next : rest)
-        [] -> error "Missing final instruction in basic block."
-    liftM ((mkFirst initial Hoopl.<*> mkMiddles medials Hoopl.<*> mkLast final) :)
-      $ blockify is'''
-  blockify [] = return []
+  grouped = splitWhen
+    (\x y -> isFinal x || labelledLabel y `Set.member` usedLabels)
+    instructions
 
-  toMedial (Labelled label instruction)
-    = gets (Set.member label) >>= \used -> if used
-      then modify (Set.delete label) >> return Nothing
-      else return $ case instruction of
-        Add out left right -> Just $ IAdd out left right
-        Equals out left right -> Just $ IEquals out left right
-        LessThan out left right -> Just $ ILessThan out left right
-        Move out in_ -> Just $ IMove out in_
-        Multiply out left right -> Just $ IMultiply out left right
-        Negate out in_ -> Just $ INegate out in_
-        Not out in_ -> Just $ INot out in_
-        Set register constant -> Just $ ISet register constant
-        _ -> Nothing
+  blockify is@(i : _) mNext = let
+    (medials, is') = spanJust toMedial is
+    (mFinal, is'') = spanJust1 toFinal is'
+    (initial, final) = case (mFinal, is'') of
+      (Just explicitFinal, []) ->
+        ( ILabel $ labelledLabel i
+        , explicitFinal
+        )
+      (Nothing, []) -> case mNext of
+        Just next ->
+          ( ILabel $ labelledLabel i
+          , IJump next
+          )
+        Nothing -> error "Missing final instruction in final basic block."
+      _ -> error "Multiple final instructions in basic block."
+    in mkFirst initial Hoopl.<*> mkMiddles medials Hoopl.<*> mkLast final
+  blockify [] _ = emptyClosedGraph
+
+  toMedial (Labelled _ instruction) = case instruction of
+    Add out left right -> Just $ IAdd out left right
+    Equals out left right -> Just $ IEquals out left right
+    LessThan out left right -> Just $ ILessThan out left right
+    Move out in_ -> Just $ IMove out in_
+    Multiply out left right -> Just $ IMultiply out left right
+    Negate out in_ -> Just $ INegate out in_
+    Not out in_ -> Just $ INot out in_
+    Set register constant -> Just $ ISet register constant
+    _ -> Nothing
 
   toFinal (Labelled _ instruction) = case instruction of
     Call (Labelled target _) depth register (Labelled next _)
@@ -347,6 +346,13 @@ programFromInputProgram (InputProgram (Vector.toList -> instructions)) = do
       -> Just $ IJumpIfZero register target next
     Return register -> Just $ IReturn register
     _ -> Nothing
+
+  isFinal (Labelled _ instruction) = case instruction of
+    Call{} -> True
+    Jump{} -> True
+    JumpIfZero{} -> True
+    Return{} -> True
+    _ -> False
 
 -- | An instruction in the intermediate representation, indexed by openness at
 -- entry and exit: an instruction with a closed entry cannot be preceded by
@@ -537,23 +543,31 @@ bug = error
 mconcatMap :: (Monoid b) => (a -> b) -> [a] -> b
 mconcatMap = mconcat .: map
 
-spanJustM :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m ([b], [a])
-spanJustM f = go []
+spanJust :: (a -> Maybe b) -> [a] -> ([b], [a])
+spanJust f = go []
   where
   -- These 'reverse's could be gotten rid of with a bit more cleverness.
   go ys l = case l of
-    x : xs -> do
-      my <- f x
-      case my of
-        Just y -> go (y : ys) xs
-        Nothing -> return (reverse ys, l)
-    [] -> return (reverse ys, l)
+    x : xs -> case f x of
+      Just y -> go (y : ys) xs
+      Nothing -> end
+    [] -> end
+    where
+    end = (reverse ys, l)
 
 spanJust1 :: (a -> Maybe b) -> [a] -> (Maybe b, [a])
 spanJust1 f l@(x : xs) = case f x of
   Nothing -> (Nothing, l)
   x'@Just{} -> (x', xs)
 spanJust1 _ [] = (Nothing, [])
+
+splitWhen :: forall a. (a -> a -> Bool) -> [a] -> [[a]]
+splitWhen f = foldr go [[]]
+  where
+  go :: a -> [[a]] -> [[a]]
+  go x ys@(z@(y : _) : zs) = if f x y then [x] : ys else (x : z) : zs
+  go x ([] : zs) = [x] : zs
+  go _ _ = error "splitWhen: the impossible happened"
 
 (.:) :: (c -> d) -> (a -> b -> c) -> a -> b -> d
 (.:) = (.) . (.)
