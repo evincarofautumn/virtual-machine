@@ -46,10 +46,10 @@ main = do
         case parseResult of
           (_, Left message) -> error $ show message
           (_idMap, Right parsed) -> do
-            let (program, entry) = unflatten parsed
+            let (program, entry, depths) = unflatten parsed
             !_ <- trace "Input: " (return ())
             !_ <- trace (showGraph show program) (return ())
-            optimized <- optimize entry program
+            optimized <- optimize entry program depths
             !_ <- trace ("\nOptimized: ") (return ())
             !_ <- trace (showGraph show optimized) (return ())
             return (optimized, entry)

@@ -20,21 +20,21 @@ import Types
 -- precede another instruction. A basic block comprises a list of instructions,
 -- closed at both ends.
 data Node e x where
-  NLabel :: Label -> Node C O
-  NAdd :: Register -> Register -> Operand -> Node O O
-  NCall :: Label -> Depth -> Register -> Label -> Node O C
-  NEquals :: Register -> Register -> Operand -> Node O O
-  NJump :: Label -> Node O C
-  NJumpIfZero :: Register -> Label -> Label -> Node O C
-  NLessThan :: Register -> Register -> Operand -> Node O O
-  NMove :: Register -> Register -> Node O O
-  NMultiply :: Register -> Register -> Operand -> Node O O
-  NNegate :: Register -> Register -> Node O O
-  NNot :: Register -> Register -> Node O O
-  NReturn :: Register -> Node O C
-  NSet :: Register -> Constant -> Node O O
+  NLabel :: !Label -> Node C O
+  NAdd :: !Register -> !Register -> !Operand -> Node O O
+  NCall :: !Label -> !Depth -> !Register -> !Label -> Node O C
+  NEquals :: !Register -> !Register -> !Operand -> Node O O
+  NJump :: !Label -> Node O C
+  NJumpIfZero :: !Register -> !Label -> !Label -> Node O C
+  NLessThan :: !Register -> !Register -> !Operand -> Node O O
+  NMove :: !Register -> !Register -> Node O O
+  NMultiply :: !Register -> !Register -> !Operand -> Node O O
+  NNegate :: !Register -> !Register -> Node O O
+  NNot :: !Register -> !Register -> Node O O
+  NReturn :: !Register -> Node O C
+  NSet :: !Register -> !Constant -> Node O O
 
-data Operand = Dynamic Register | Static Constant
+data Operand = Dynamic !Register | Static !Constant
   deriving (Eq, Ord)
 
 operand :: (Register -> a) -> (Constant -> a) -> Operand -> a

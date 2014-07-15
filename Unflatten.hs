@@ -7,8 +7,10 @@ module Unflatten
   ( unflatten
   ) where
 
+import Control.Applicative
 import Compiler.Hoopl hiding ((<*>))
 import Data.List
+import Data.Maybe
 
 import qualified Compiler.Hoopl as Hoopl
 import qualified Data.Set as Set
@@ -21,12 +23,24 @@ import Utils
 
 -- | Unflattens a sequence of instructions into a control flow graph plus a
 -- label indicating the entry point.
-unflatten :: FlatProgram Parsed -> (Graph Node C C, Label)
+unflatten :: FlatProgram Parsed -> (Graph Node C C, Label, LabelMap Depth)
 unflatten (FlatProgram (Vector.toList -> instructions)) =
   ( foldl' (|*><*|) emptyClosedGraph blockified
   , labelledLabel $ head instructions
+  , mapFromList $ mapMaybe
+    (\block -> (,)
+      (head . setElems $ labelsDefined block)  -- Possibly unsafe use of 'head'.
+      . (\ (Register n) -> Depth (abs n))
+      <$>
+      (foldGraphNodes (\node -> min (minRegisterMaybe node)) block . Just $ Register 0)
+    )
+    blockified
   )
   where
+  minRegisterMaybe node = let
+    set = registerSet node
+    in if Set.null set then Nothing else Just (Set.findMin set)
+
   blockified = map (uncurry blockify)
     . zip grouped
     $ map (Just . labelledLabel . head) (tail grouped) ++ [Nothing]

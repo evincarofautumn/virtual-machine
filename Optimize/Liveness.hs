@@ -20,9 +20,9 @@ import Types
 type LiveSet = Set Register
 
 -- | Performs liveness analysis and eliminates dead assignments.
-pass :: (FuelMonad m) => BwdPass m Node LiveSet
-pass = BwdPass
-  { bp_lattice = lattice, bp_transfer = transfer, bp_rewrite = rewrite }
+pass :: (FuelMonad m) => LabelMap Depth -> BwdPass m Node LiveSet
+pass depths = BwdPass
+  { bp_lattice = lattice, bp_transfer = transfer depths, bp_rewrite = rewrite }
 
 lattice :: DataflowLattice LiveSet
 lattice = DataflowLattice
@@ -34,8 +34,8 @@ lattice = DataflowLattice
     in (factChange, factJoin)
   }
 
-transfer :: BwdTransfer Node LiveSet
-transfer = mkBTransfer3 initial medial final
+transfer :: LabelMap Depth -> BwdTransfer Node LiveSet
+transfer depths = mkBTransfer3 initial medial final
   where
   initial :: Node C O -> LiveSet -> LiveSet
   initial NLabel{} facts = facts
@@ -58,14 +58,17 @@ transfer = mkBTransfer3 initial medial final
   final instruction facts = case instruction of
     NJump label -> addUses (facts `about` label) instruction
     NJumpIfZero _ true false
-      -> addUses (facts `about` true <> facts `about` false) instruction
-    NCall _ (Depth depth) out label
+      -> addUses ((facts `about` true) <> (facts `about` false)) instruction
+    NCall target (Depth depth) out label
       -> addUses (arguments <> Set.delete out (facts `about` label)) instruction
       where
-      -- We don't know which arguments the called procedure will use, so we
-      -- conservatively assume it can use any of them, and that they are all
-      -- therefore live at the point of the call.
-      arguments = Set.fromList $ map Register [0 .. pred depth]
+      arguments = Set.fromList $ map Register [maxArgument .. pred depth]
+      maxArgument = case mapLookup target depths of
+        Just (Depth known) -> depth - known
+        -- We don't know which arguments the called procedure will use, so we
+        -- conservatively assume it can use any of them, and that they are all
+        -- therefore live at the point of the call. (This should not happen.)
+        Nothing -> 0
     NReturn _ -> addUses (fact_bot lattice) instruction
 
 rewrite :: forall m. (FuelMonad m) => BwdRewrite m Node LiveSet
