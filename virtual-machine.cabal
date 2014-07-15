@@ -16,11 +16,10 @@ executable virtual-machine
   ghc-options:
     -Wall
     -Werror
-    -O2
+    -O3
 
   if flag(prof)
     ghc-options:
-      -prof
       -fprof-auto
       -rtsopts
 

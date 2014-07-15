@@ -56,38 +56,62 @@ run entry graph machineArguments = do
   pc <- newIORef entry'
 
   let
+
+    {-# INLINE pushValue #-}
     pushValue value = do
       vsp' <- readIORef vsp
       Unboxed.write vs vsp' value
       modifyIORef' vsp succ
+
+    {-# INLINE pushCall #-}
     pushCall value = do
       csp' <- readIORef csp
       Mutable.write cs csp' value
       modifyIORef' csp succ
+
+    {-# INLINE binary #-}
     binary f out left right = do
       value <- f <$> readRegister left <*> readRegister right
       writeRegister out value
+
+    {-# INLINE unary #-}
     unary f out in_ = writeRegister out . f =<< readRegister in_
+
+    {-# INLINE writeRegister #-}
     writeRegister (Register n) x
       = registerOffset n >>= \n' -> Unboxed.write vs n' x
+
+    {-# INLINE readRegister #-}
     readRegister (Register n) = Unboxed.read vs =<< registerOffset n
+
+    {-# INLINE registerOffset #-}
     registerOffset n = (+) <$> readIORef vsp <*> pure n
+
+    {-# INLINE jump #-}
     jump (Target target) = writeIORef pc target >> return Resume
+
+    {-# INLINE proceed #-}
     proceed = return Proceed
+
+    {-# INLINE halt #-}
     halt = return . Halt
+
+    {-# INLINE enter #-}
     enter frame@(StackFrame _ (Depth depth) _) = do
       pushCall frame
       modifyIORef' vsp (+ depth)
 
     -- Invariant: call stack is not empty.
+    {-# INLINE leave #-}
     leave = do
       frame@(StackFrame _ (Depth depth) _) <- Mutable.read cs . pred =<< readIORef csp
       modifyIORef' vsp (subtract depth)
       modifyIORef' csp pred
       return frame
 
+    {-# INLINE bool #-}
     bool :: Bool -> Cell
-    bool = fromIntegral . fromEnum
+    bool x = if x then 1 else 0
 
   Vector.mapM_ pushValue machineArguments
 
