@@ -47,7 +47,6 @@ transfer depths = mkBTransfer3 initial medial final
     NAdd out _ _ -> addUsesBut out
     NEquals out _ _ -> addUsesBut out
     NLessThan out _ _ -> addUsesBut out
-    NMove out _ -> addUsesBut out
     NMultiply out _ _ -> addUsesBut out
     NNegate out _ -> addUsesBut out
     NNot out _ -> addUsesBut out
@@ -82,7 +81,6 @@ rewrite = mkBRewrite3 initial medial final
     NAdd out _ _ | dead out -> Just emptyGraph
     NEquals out _ _ | dead out -> Just emptyGraph
     NLessThan out _ _ | dead out -> Just emptyGraph
-    NMove out _ | dead out -> Just emptyGraph
     NMultiply out _ _ | dead out -> Just emptyGraph
     NNegate out _ | dead out -> Just emptyGraph
     NNot out _ | dead out -> Just emptyGraph

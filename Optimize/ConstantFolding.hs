@@ -50,13 +50,13 @@ transfer = mkFTransfer3 initial medial final
       -> if Dynamic a == b
         then Map.insert out (PElem (Constant 0)) facts
         else top out
-    NMove out a
-      -- Self-assignment does not destroy information.
-      -> if a == out then facts else top out
     NMultiply out _ _ -> top out
     NNegate out _ -> top out
     NNot out _ -> top out
-    NSet out constant -> Map.insert out (PElem constant) facts
+    NSet out (Dynamic a)
+      -- Self-assignment does not destroy information.
+      -> if out == a then facts else top out
+    NSet out (Static constant) -> Map.insert out (PElem constant) facts
     where top x = Map.insert x Top facts
 
   final :: Node O C -> ValueSet -> FactBase ValueSet
@@ -96,19 +96,19 @@ rewrite = mkFRewrite3 initial medial final
     NAdd out left (Dynamic right)
       -> match right $ NAdd out left . Static . Constant
     NAdd out left (Static (Constant right))
-      -> match left $ NSet out . Constant . (+ right)
+      -> match left $ NSet out . Static . Constant . (+ right)
     NEquals out left (Dynamic right)
       -> match right $ NEquals out left . Static . Constant
     NEquals out left (Static (Constant right))
-      -> match left $ NSet out . Constant . fromIntegral . fromEnum . (== right)
+      -> match left $ NSet out . Static . Constant . fromIntegral . fromEnum . (== right)
     NLessThan out left (Dynamic right)
       -> match right $ NLessThan out left . Static . Constant
     NLessThan out left (Static (Constant right))
-      -> match left $ NSet out . Constant . fromIntegral . fromEnum . (< right)
+      -> match left $ NSet out . Static . Constant . fromIntegral . fromEnum . (< right)
     NMultiply out left (Dynamic right)
       -> match right $ NMultiply out left . Static . Constant
     NMultiply out left (Static (Constant right))
-      -> match left $ NSet out . Constant . (* right)
+      -> match left $ NSet out . Static . Constant . (* right)
     _ -> return Nothing
     where
     match :: Register -> (Cell -> Node O O) -> m (Maybe (Graph Node O O))

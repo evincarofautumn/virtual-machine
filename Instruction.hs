@@ -31,21 +31,31 @@ data Origin = Parsed | Optimized
 -- by the parser or by the optimizer.
 data Instruction (a :: Origin) where
   IAddRR :: !Register -> !Register -> !Register -> Instruction a
-  IAddRC :: !Register -> !Register -> !Constant -> Instruction a
+  IAddRC :: !Register -> !Register -> !Constant -> Instruction Optimized
+  IAddR :: !Register -> !Register -> Instruction Optimized
+  IAddC :: !Register -> !Constant -> Instruction Optimized
   ICall :: {-lazy-}(Labelled Target) -> !Depth -> !Register -> {-lazy-}(Labelled Target) -> Instruction a
   IEqualsRR :: !Register -> !Register -> !Register -> Instruction a
-  IEqualsRC :: !Register -> !Register -> !Constant -> Instruction a
+  IEqualsRC :: !Register -> !Register -> !Constant -> Instruction Optimized
+  IEqualsR :: !Register -> !Register -> Instruction Optimized
+  IEqualsC :: !Register -> !Constant -> Instruction Optimized
   IJump :: {-lazy-}(Labelled Target) -> Instruction a
   IJumpIfZero :: !Register -> {-lazy-}(Labelled Target) -> {-lazy-}(Labelled Target) -> Instruction a
   ILessThanRR :: !Register -> !Register -> !Register -> Instruction a
-  ILessThanRC :: !Register -> !Register -> !Constant -> Instruction a
-  IMove :: !Register -> !Register -> Instruction a
+  ILessThanRC :: !Register -> !Register -> !Constant -> Instruction Optimized
+  ILessThanR :: !Register -> !Register -> Instruction Optimized
+  ILessThanC :: !Register -> !Constant -> Instruction Optimized
   IMultiplyRR :: !Register -> !Register -> !Register -> Instruction a
-  IMultiplyRC :: !Register -> !Register -> !Constant -> Instruction a
-  INegate :: !Register -> !Register -> Instruction a
-  INot :: !Register -> !Register -> Instruction a
+  IMultiplyRC :: !Register -> !Register -> !Constant -> Instruction Optimized
+  IMultiplyR :: !Register -> !Register -> Instruction Optimized
+  IMultiplyC :: !Register -> !Constant -> Instruction Optimized
+  INegateR :: !Register -> !Register -> Instruction a
+  INegate :: !Register -> Instruction Optimized
+  INotR :: !Register -> !Register -> Instruction a
+  INot :: !Register -> Instruction Optimized
   IReturn :: !Register -> Instruction a
-  ISet :: !Register -> !Constant -> Instruction a
+  ISetRR :: !Register -> !Register -> Instruction a
+  ISetRC :: !Register -> !Constant -> Instruction a
 
 deriving instance Show (Instruction a)
 

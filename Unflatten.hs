@@ -1,5 +1,6 @@
 {-#
   LANGUAGE DataKinds
+  , GADTs
   , ViewPatterns
   #-}
 
@@ -68,11 +69,11 @@ unflatten (FlatProgram (Vector.toList -> instructions)) =
     IAddRR out left right -> Just $ NAdd out left (Dynamic right)
     IEqualsRR out left right -> Just $ NEquals out left (Dynamic right)
     ILessThanRR out left right -> Just $ NLessThan out left (Dynamic right)
-    IMove out in_ -> Just $ NMove out in_
     IMultiplyRR out left right -> Just $ NMultiply out left (Dynamic right)
-    INegate out in_ -> Just $ NNegate out in_
-    INot out in_ -> Just $ NNot out in_
-    ISet register constant -> Just $ NSet register constant
+    INegateR out in_ -> Just $ NNegate out in_
+    INotR out in_ -> Just $ NNot out in_
+    ISetRR out in_ -> Just $ NSet out (Dynamic in_)
+    ISetRC register constant -> Just $ NSet register (Static constant)
     _ -> Nothing
 
   toFinal (Labelled _ instruction) = case instruction of

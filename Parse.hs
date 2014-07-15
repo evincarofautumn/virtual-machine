@@ -40,11 +40,11 @@ parse filename file = runIdMap
       [ IAddRR <$ word "Add" <*> registerComma <*> registerComma <*> register
       , register3 (word "Equals") IEqualsRR
       , register3 (word "LessThan") ILessThanRR
-      , try $ register2 (word "Move") IMove
+      , try $ register2 (word "Move") ISetRR
       , register3 (word "Multiply") IMultiplyRR
-      , try $ register2 (word "Negate") INegate
-      , register2 (word "Not") INot
-      , ISet <$ word "Set" <*> registerComma <*> constant
+      , try $ register2 (word "Negate") INegateR
+      , register2 (word "Not") INotR
+      , ISetRC <$ word "Set" <*> registerComma <*> constant
       ]
     final next = choice
       [ ICall <$ word "Call"

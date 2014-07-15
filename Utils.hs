@@ -33,5 +33,6 @@ splitWhen f = foldr go [[]]
   go x ([] : zs) = [x] : zs
   go _ _ = error "splitWhen: the impossible happened"
 
+{-# INLINE (.:) #-}
 (.:) :: (c -> d) -> (a -> b -> c) -> a -> b -> d
 (.:) = (.) . (.)

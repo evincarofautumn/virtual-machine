@@ -74,8 +74,16 @@ run entry graph machineArguments = do
       value <- f <$> readRegister left <*> readRegister right
       writeRegister out value
 
+    {-# INLINE inPlaceBinary #-}
+    inPlaceBinary f out right = do
+      value <- f <$> readRegister out <*> readRegister right
+      writeRegister out value
+
     {-# INLINE unary #-}
     unary f out in_ = writeRegister out . f =<< readRegister in_
+
+    {-# INLINE inPlaceUnary #-}
+    inPlaceUnary f out = writeRegister out . f =<< readRegister out
 
     {-# INLINE writeRegister #-}
     writeRegister (Register n) x
@@ -121,22 +129,31 @@ run entry graph machineArguments = do
     action <- case instruction of
       IAddRR out left right -> binary (+) out left right >> proceed
       IAddRC out left (Constant right) -> unary (+ right) out left >> proceed
+      IAddR out in_ -> inPlaceBinary (+) out in_ >> proceed
+      IAddC out (Constant in_) -> inPlaceUnary (+ in_) out >> proceed
       ICall (Labelled _ target) depth result (Labelled _ next) -> do
         enter $ StackFrame next depth result
         jump target
       IEqualsRR out left right -> binary (bool .: (==)) out left right >> proceed
       IEqualsRC out left (Constant right) -> unary (bool . (== right)) out left >> proceed
+      IEqualsR out in_ -> inPlaceBinary (bool .: (==)) out in_ >> proceed
+      IEqualsC out (Constant in_) -> inPlaceUnary (bool . (== in_)) out >> proceed
       IJump (Labelled _ target) -> jump target
       IJumpIfZero register (Labelled _ target) (Labelled _ next) -> do
         value <- readRegister register
         if value == 0 then jump target else jump next
       ILessThanRR out left right -> binary (bool .: (<)) out left right >> proceed
       ILessThanRC out left (Constant right) -> unary (bool . (< right)) out left >> proceed
-      IMove out in_ -> unary id out in_ >> proceed
+      ILessThanR out in_ -> inPlaceBinary (bool .: (<)) out in_ >> proceed
+      ILessThanC out (Constant in_) -> inPlaceUnary (bool . (< in_)) out >> proceed
       IMultiplyRR out left right -> binary (*) out left right >> proceed
       IMultiplyRC out left (Constant right) -> unary (* right) out left >> proceed
-      INegate out in_ -> unary negate out in_ >> proceed
-      INot out in_ -> unary (bool . (== 0)) out in_ >> proceed
+      IMultiplyR out in_ -> inPlaceBinary (*) out in_ >> proceed
+      IMultiplyC out (Constant in_) -> inPlaceUnary (* in_) out >> proceed
+      INegateR out in_ -> unary negate out in_ >> proceed
+      INegate out -> inPlaceUnary negate out >> proceed
+      INotR out in_ -> unary (bool . (== 0)) out in_ >> proceed
+      INot out -> inPlaceUnary (bool . (== 0)) out >> proceed
       IReturn result -> do
         csp' <- pred <$> readIORef csp
         result' <- readRegister result
@@ -144,7 +161,8 @@ run entry graph machineArguments = do
           StackFrame next _ out <- leave
           writeRegister out result'
           jump next
-      ISet register (Constant constant)
+      ISetRR out in_ -> unary id out in_ >> proceed
+      ISetRC register (Constant constant)
         -> writeRegister register constant >> proceed
 
     case action of
@@ -178,22 +196,27 @@ flatten entry graph =
     -> (Map Label Int, [Instruction Optimized])
   addNode i (labels, is) = case i of
     NLabel label -> (Map.insert label (length is) labels, is)
-    NAdd out left right -> instruction
-      $ operand (IAddRR out left) (IAddRC out left) right
+    NAdd out left right -> instruction $ if out == left
+      then operand (IAddR out) (IAddC out) right
+      else operand (IAddRR out left) (IAddRC out left) right
     NCall target depth out next -> instruction
       $ ICall (targetForLabel target) depth out (targetForLabel next)
-    NEquals out left right -> instruction
-      $ operand (IEqualsRR out left) (IEqualsRC out left) right
+    NEquals out left right -> instruction $ if out == left
+      then operand (IEqualsR out) (IEqualsC out) right
+      else operand (IEqualsRR out left) (IEqualsRC out left) right
     NJump target -> instruction $ IJump (targetForLabel target)
     NJumpIfZero register true false -> instruction
       $ IJumpIfZero register (targetForLabel true) (targetForLabel false)
-    NLessThan out left right -> instruction
-      $ operand (ILessThanRR out left) (ILessThanRC out left) right
-    NMove out in_ -> instruction $ IMove out in_
-    NMultiply out left right -> instruction
-      $ operand (IMultiplyRR out left) (IMultiplyRC out left) right
-    NNegate out in_ -> instruction $ INegate out in_
-    NNot out in_ -> instruction $ INot out in_
+    NLessThan out left right -> instruction $ if out == left
+      then operand (ILessThanR out) (ILessThanC out) right
+      else operand (ILessThanRR out left) (ILessThanRC out left) right
+    NMultiply out left right -> instruction $ if out == left
+      then operand (IMultiplyR out) (IMultiplyC out) right
+      else operand (IMultiplyRR out left) (IMultiplyRC out left) right
+    NNegate out in_ -> instruction
+      $ if out == in_ then INegate out else INegateR out in_
+    NNot out in_ -> instruction
+      $ if out == in_ then INot out else INotR out in_
     NReturn register -> instruction $ IReturn register
-    NSet register value -> instruction $ ISet register value
+    NSet out in_ -> instruction $ operand (ISetRR out) (ISetRC out) in_
     where instruction x = (labels, x : is)

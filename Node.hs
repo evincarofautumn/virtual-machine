@@ -27,12 +27,11 @@ data Node e x where
   NJump :: !Label -> Node O C
   NJumpIfZero :: !Register -> !Label -> !Label -> Node O C
   NLessThan :: !Register -> !Register -> !Operand -> Node O O
-  NMove :: !Register -> !Register -> Node O O
   NMultiply :: !Register -> !Register -> !Operand -> Node O O
   NNegate :: !Register -> !Register -> Node O O
   NNot :: !Register -> !Register -> Node O O
   NReturn :: !Register -> Node O C
-  NSet :: !Register -> !Constant -> Node O O
+  NSet :: !Register -> !Operand -> Node O O
 
 data Operand = Dynamic !Register | Static !Constant
   deriving (Eq, Ord)
@@ -54,7 +53,6 @@ instance Show (Node e x) where
     NJump label -> '\t' : unwords ["jump", show label]
     NJumpIfZero a t f -> '\t' : unwords ["if", show a, "= 0 then", show t, "else", show f]
     NLessThan a b c -> '\t' : unwords [show a, ":=", show b, "<", show c]
-    NMove a b -> '\t' : unwords [show a, ":=", show b]
     NMultiply a b c -> '\t' : unwords [show a, ":=", show b, "*", show c]
     NNegate a b -> '\t' : unwords [show a, ":= -", show b]
     NNot a b -> '\t' : unwords [show a, ":= not", show b]
@@ -78,9 +76,8 @@ registerSet = \case
   NJump _ -> Set.empty
   NJumpIfZero a _ _ -> Set.singleton a
   NLessThan a b c -> Set.fromList $ [a, b] ++ [r | Dynamic r <- [c]]
-  NMove a b -> Set.fromList [a, b]
   NMultiply a b c -> Set.fromList $ [a, b] ++ [r | Dynamic r <- [c]]
   NNegate a b -> Set.fromList [a, b]
   NNot a b -> Set.fromList [a, b]
   NReturn a -> Set.singleton a
-  NSet a _ -> Set.singleton a
+  NSet a b -> Set.fromList $ [a] ++ [r | Dynamic r <- [b]]
