@@ -1,4 +1,7 @@
-{-# LANGUAGE NoMonomorphismRestriction #-}
+{-#
+  LANGUAGE DataKinds
+  , NoMonomorphismRestriction
+  #-}
 
 module Parse
   ( parse
@@ -20,7 +23,7 @@ import Types
 parse
   :: SourceName
   -> Lazy.Text
-  -> SimpleUniqueMonad (IdMap, Either ParseError FlatProgram)
+  -> SimpleUniqueMonad (IdMap, Either ParseError (FlatProgram Parsed))
 parse filename file = runIdMap
   $ runParserT program () filename file
   where
@@ -34,11 +37,11 @@ parse filename file = runIdMap
     Labelled current <$> (medial <|> final next)
     where
     medial = choice
-      [ IAdd <$ word "Add" <*> registerComma <*> registerComma <*> register
-      , register3 (word "Equals") IEquals
-      , register3 (word "LessThan") ILessThan
+      [ IAddRR <$ word "Add" <*> registerComma <*> registerComma <*> register
+      , register3 (word "Equals") IEqualsRR
+      , register3 (word "LessThan") ILessThanRR
       , try $ register2 (word "Move") IMove
-      , register3 (word "Multiply") IMultiply
+      , register3 (word "Multiply") IMultiplyRR
       , try $ register2 (word "Negate") INegate
       , register2 (word "Not") INot
       , ISet <$ word "Set" <*> registerComma <*> constant

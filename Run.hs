@@ -1,4 +1,7 @@
-{-# LANGUAGE GADTs #-}
+{-#
+  LANGUAGE DataKinds
+  , GADTs
+  #-}
 
 module Run
   ( run
@@ -92,18 +95,22 @@ run entry graph machineArguments = do
     instruction <- (instructions Vector.!) <$> readIORef pc
 
     action <- case instruction of
-      IAdd out left right -> binary (+) out left right >> proceed
+      IAddRR out left right -> binary (+) out left right >> proceed
+      IAddRC out left (Constant right) -> unary (+ right) out left >> proceed
       ICall (Labelled _ target) depth result (Labelled _ next) -> do
         enter $ StackFrame next depth result
         jump target
-      IEquals out left right -> binary (bool .: (==)) out left right >> proceed
+      IEqualsRR out left right -> binary (bool .: (==)) out left right >> proceed
+      IEqualsRC out left (Constant right) -> unary (bool . (== right)) out left >> proceed
       IJump (Labelled _ target) -> jump target
       IJumpIfZero register (Labelled _ target) (Labelled _ next) -> do
         value <- readRegister register
         if value == 0 then jump target else jump next
-      ILessThan out left right -> binary (bool .: (<)) out left right >> proceed
+      ILessThanRR out left right -> binary (bool .: (<)) out left right >> proceed
+      ILessThanRC out left (Constant right) -> unary (bool . (< right)) out left >> proceed
       IMove out in_ -> unary id out in_ >> proceed
-      IMultiply out left right -> binary (*) out left right >> proceed
+      IMultiplyRR out left right -> binary (*) out left right >> proceed
+      IMultiplyRC out left (Constant right) -> unary (* right) out left >> proceed
       INegate out in_ -> unary negate out in_ >> proceed
       INot out in_ -> unary (bool . (== 0)) out in_ >> proceed
       IReturn result -> do
@@ -126,7 +133,7 @@ run entry graph machineArguments = do
   valueStackSize = (2::Int) ^ (20::Int)
 
 -- | Flattens a control flow graph into executable instructions.
-flatten :: Label -> Graph Node C C -> (Target, Vector Instruction)
+flatten :: Label -> Graph Node C C -> (Target, Vector (Instruction Optimized))
 flatten entry graph =
   ( labelledValue $ targetForLabel entry
   , Vector.reverse $ Vector.fromList finalInstructions
@@ -143,23 +150,26 @@ flatten entry graph =
 
   addNode
     :: Node e x
-    -> (Map Label Int, [Instruction])
-    -> (Map Label Int, [Instruction])
+    -> (Map Label Int, [Instruction Optimized])
+    -> (Map Label Int, [Instruction Optimized])
   addNode i (labels, is) = case i of
     NLabel label -> (Map.insert label (length is) labels, is)
-    NAdd out left right -> instruction $ IAdd out left right
+    NAdd out left right -> instruction
+      $ operand (IAddRR out left) (IAddRC out left) right
     NCall target depth out next -> instruction
       $ ICall (targetForLabel target) depth out (targetForLabel next)
-    NEquals out left right -> instruction $ IEquals out left right
+    NEquals out left right -> instruction
+      $ operand (IEqualsRR out left) (IEqualsRC out left) right
     NJump target -> instruction $ IJump (targetForLabel target)
     NJumpIfZero register true false -> instruction
       $ IJumpIfZero register (targetForLabel true) (targetForLabel false)
-    NLessThan out left right -> instruction $ ILessThan out left right
+    NLessThan out left right -> instruction
+      $ operand (ILessThanRR out left) (ILessThanRC out left) right
     NMove out in_ -> instruction $ IMove out in_
-    NMultiply out left right -> instruction $ IMultiply out left right
+    NMultiply out left right -> instruction
+      $ operand (IMultiplyRR out left) (IMultiplyRC out left) right
     NNegate out in_ -> instruction $ INegate out in_
     NNot out in_ -> instruction $ INot out in_
     NReturn register -> instruction $ IReturn register
     NSet register value -> instruction $ ISet register value
-    where
-    instruction x = (labels, x : is)
+    where instruction x = (labels, x : is)

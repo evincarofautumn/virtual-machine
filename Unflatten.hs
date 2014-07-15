@@ -1,4 +1,7 @@
-{-# LANGUAGE ViewPatterns #-}
+{-#
+  LANGUAGE DataKinds
+  , ViewPatterns
+  #-}
 
 module Unflatten
   ( unflatten
@@ -18,7 +21,7 @@ import Utils
 
 -- | Unflattens a sequence of instructions into a control flow graph plus a
 -- label indicating the entry point.
-unflatten :: FlatProgram -> (Graph Node C C, Label)
+unflatten :: FlatProgram Parsed -> (Graph Node C C, Label)
 unflatten (FlatProgram (Vector.toList -> instructions)) =
   ( foldl' (|*><*|) emptyClosedGraph blockified
   , labelledLabel $ head instructions
@@ -48,11 +51,11 @@ unflatten (FlatProgram (Vector.toList -> instructions)) =
   blockify [] _ = emptyClosedGraph
 
   toMedial (Labelled _ instruction) = case instruction of
-    IAdd out left right -> Just $ NAdd out left right
-    IEquals out left right -> Just $ NEquals out left right
-    ILessThan out left right -> Just $ NLessThan out left right
+    IAddRR out left right -> Just $ NAdd out left (Dynamic right)
+    IEqualsRR out left right -> Just $ NEquals out left (Dynamic right)
+    ILessThanRR out left right -> Just $ NLessThan out left (Dynamic right)
     IMove out in_ -> Just $ NMove out in_
-    IMultiply out left right -> Just $ NMultiply out left right
+    IMultiplyRR out left right -> Just $ NMultiply out left (Dynamic right)
     INegate out in_ -> Just $ NNegate out in_
     INot out in_ -> Just $ NNot out in_
     ISet register constant -> Just $ NSet register constant

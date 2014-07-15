@@ -1,4 +1,8 @@
-{-# LANGUAGE GADTs, ScopedTypeVariables #-}
+{-#
+  LANGUAGE GADTs
+  , PatternGuards
+  , ScopedTypeVariables
+  #-}
 
 module Optimize.ConstantFolding
   ( initialFacts
@@ -38,10 +42,14 @@ transfer = mkFTransfer3 initial medial final
     NAdd out _ _ -> top out
     NEquals out a b
       -- x == x is always true.
-      -> if a == b then Map.insert out (PElem (Constant 1)) facts else top out
+      -> if Dynamic a == b
+        then Map.insert out (PElem (Constant 1)) facts
+        else top out
     NLessThan out a b
       -- x < x is always false.
-      -> if a == b then Map.insert out (PElem (Constant 0)) facts else top out
+      -> if Dynamic a == b
+        then Map.insert out (PElem (Constant 0)) facts
+        else top out
     NMove out a
       -- Self-assignment does not destroy information.
       -> if a == out then facts else top out
@@ -49,8 +57,7 @@ transfer = mkFTransfer3 initial medial final
     NNegate out _ -> top out
     NNot out _ -> top out
     NSet out constant -> Map.insert out (PElem constant) facts
-    where
-    top x = Map.insert x Top facts
+    where top x = Map.insert x Top facts
 
   final :: Node O C -> ValueSet -> FactBase ValueSet
   final instruction facts = case instruction of
@@ -85,7 +92,29 @@ rewrite = mkFRewrite3 initial medial final
   initial _node _facts = return Nothing
 
   medial :: Node O O -> ValueSet -> m (Maybe (Graph Node O O))
-  medial _instruction _facts = return Nothing
+  medial instruction facts = case instruction of
+    NAdd out left (Dynamic right)
+      -> match right $ NAdd out left . Static . Constant
+    NAdd out left (Static (Constant right))
+      -> match left $ NSet out . Constant . (+ right)
+    NEquals out left (Dynamic right)
+      -> match right $ NEquals out left . Static . Constant
+    NEquals out left (Static (Constant right))
+      -> match left $ NSet out . Constant . fromIntegral . fromEnum . (== right)
+    NLessThan out left (Dynamic right)
+      -> match right $ NLessThan out left . Static . Constant
+    NLessThan out left (Static (Constant right))
+      -> match left $ NSet out . Constant . fromIntegral . fromEnum . (< right)
+    NMultiply out left (Dynamic right)
+      -> match right $ NMultiply out left . Static . Constant
+    NMultiply out left (Static (Constant right))
+      -> match left $ NSet out . Constant . (* right)
+    _ -> return Nothing
+    where
+    match :: Register -> (Cell -> Node O O) -> m (Maybe (Graph Node O O))
+    match register f = case Map.lookup register facts of
+      Just (PElem (Constant constant)) -> return . Just . mkMiddle $ f constant
+      _ -> return Nothing
 
   final :: Node O C -> ValueSet -> m (Maybe (Graph Node O C))
   final _node _facts = return Nothing
