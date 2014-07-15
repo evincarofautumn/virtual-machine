@@ -15,6 +15,7 @@ import Types
 
 type IdMap = IntMap Label
 
+-- | A monad for generating fresh labels associated with IDs.
 newtype IdMapMonad a = IdMapMonad
   { unIdMap :: IdMap -> SimpleUniqueMonad (IdMap, a) }
 
@@ -34,6 +35,7 @@ instance Applicative IdMapMonad where
     x <- mx
     return $ f x
 
+-- | Retrieves the label for a given target or creates a fresh one for it.
 labelForTarget :: Target -> IdMapMonad Label
 labelForTarget (Target index) = IdMapMonad
   $ \env -> case IntMap.lookup index env of
@@ -42,5 +44,6 @@ labelForTarget (Target index) = IdMapMonad
       label <- freshLabel
       return (IntMap.insert index label env, label)
 
+-- | Runs an action with a fresh id-label mapping.
 runIdMap :: IdMapMonad a -> SimpleUniqueMonad (IdMap, a)
 runIdMap (IdMapMonad m) = m IntMap.empty

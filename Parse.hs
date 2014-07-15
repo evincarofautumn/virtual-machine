@@ -9,6 +9,7 @@ module Parse
 
 import Compiler.Hoopl hiding ((<*>))
 import Control.Applicative
+import Control.Monad
 import Control.Monad.Trans.Class
 import Text.Parsec hiding (State, (<|>), label, labels, many, parse)
 import Text.Parsec.Text.Lazy ()
@@ -20,11 +21,13 @@ import IdMap
 import Instruction
 import Types
 
+-- | Parses a source file containing "simple register machine" assembly into a
+-- 'FlatProgram' containing only basic (non-'Optimized') instructions.
 parse
-  :: SourceName
-  -> Lazy.Text
-  -> SimpleUniqueMonad (IdMap, Either ParseError (FlatProgram Parsed))
-parse filename file = runIdMap
+  :: SourceName  -- ^ Source file name, for Parsec's error reporting.
+  -> Lazy.Text  -- ^ Input stream.
+  -> SimpleUniqueMonad (Either ParseError (FlatProgram Parsed))
+parse filename file = liftM snd . runIdMap
   $ runParserT program () filename file
   where
   program = FlatProgram . Vector.fromList

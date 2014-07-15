@@ -31,6 +31,7 @@ lattice = DataflowLattice
     -> if old == new then (NoChange, PElem new) else (SomeChange, Top)
   }
 
+-- | Performs constant propagation analysis.
 transfer :: FwdTransfer Node ValueSet
 transfer = mkFTransfer3 initial medial final
   where
@@ -80,11 +81,13 @@ transfer = mkFTransfer3 initial medial final
       --
       -- > arguments = map Register [0 .. pred depth]
       --
-      -- But that's no fun.
+      -- But that's no fun, so we cross our fingers and pretend that function
+      -- arguments are immutable.
       --
       arguments = []
     NReturn _ -> mapEmpty
 
+-- | Performs constant folding.
 rewrite :: forall m. (FuelMonad m) => FwdRewrite m Node ValueSet
 rewrite = mkFRewrite3 initial medial final
   where
@@ -94,27 +97,28 @@ rewrite = mkFRewrite3 initial medial final
   medial :: Node O O -> ValueSet -> m (Maybe (Graph Node O O))
   medial instruction facts = case instruction of
     NAdd out left (Dynamic right)
-      -> match right $ NAdd out left . Static . Constant
+      -> match right $ NAdd out left . static
     NAdd out left (Static (Constant right))
-      -> match left $ NSet out . Static . Constant . (+ right)
+      -> match left $ NSet out . static . (+ right)
     NEquals out left (Dynamic right)
-      -> match right $ NEquals out left . Static . Constant
+      -> match right $ NEquals out left . static
     NEquals out left (Static (Constant right))
-      -> match left $ NSet out . Static . Constant . fromIntegral . fromEnum . (== right)
+      -> match left $ NSet out . static . fromIntegral . fromEnum . (== right)
     NLessThan out left (Dynamic right)
-      -> match right $ NLessThan out left . Static . Constant
+      -> match right $ NLessThan out left . static
     NLessThan out left (Static (Constant right))
-      -> match left $ NSet out . Static . Constant . fromIntegral . fromEnum . (< right)
+      -> match left $ NSet out . static . fromIntegral . fromEnum . (< right)
     NMultiply out left (Dynamic right)
-      -> match right $ NMultiply out left . Static . Constant
+      -> match right $ NMultiply out left . static
     NMultiply out left (Static (Constant right))
-      -> match left $ NSet out . Static . Constant . (* right)
+      -> match left $ NSet out . static . (* right)
     _ -> return Nothing
     where
     match :: Register -> (Cell -> Node O O) -> m (Maybe (Graph Node O O))
     match register f = case Map.lookup register facts of
       Just (PElem (Constant constant)) -> return . Just . mkMiddle $ f constant
       _ -> return Nothing
+    static = Static . Constant
 
   final :: Node O C -> ValueSet -> m (Maybe (Graph Node O C))
   final instruction facts = case instruction of
@@ -128,6 +132,7 @@ initialFacts entry
   = mapSingleton entry
   $ Map.fromList [(Register r, Top) | r <- [0 .. registerLimit]]
 
--- | An arbitrary limit on the number of registers that may be active at once.
+-- | An arbitrary limit on the number of registers that may be active at once,
+-- because a cleaner solution didn't come to mind using Hoopl's API.
 registerLimit :: Int
 registerLimit = 256

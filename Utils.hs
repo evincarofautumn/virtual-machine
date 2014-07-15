@@ -1,6 +1,10 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module Utils where
 
 import Data.Monoid
+
+type Build a = a -> a
 
 bug :: String -> a
 bug = error
@@ -26,9 +30,10 @@ spanJust1 f l@(x : xs) = case f x of
   x'@Just{} -> (x', xs)
 spanJust1 _ [] = (Nothing, [])
 
-splitWhen :: (a -> a -> Bool) -> [a] -> [[a]]
+splitWhen :: forall a. (a -> a -> Bool) -> [a] -> [[a]]
 splitWhen f = foldr go [[]]
   where
+  go :: a -> [[a]] -> [[a]]
   go x ys@(z@(y : _) : zs) = if f x y then [x] : ys else (x : z) : zs
   go x ([] : zs) = [x] : zs
   go _ _ = error "splitWhen: the impossible happened"

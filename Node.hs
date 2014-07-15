@@ -33,9 +33,13 @@ data Node e x where
   NReturn :: !Register -> Node O C
   NSet :: !Register -> !Operand -> Node O O
 
-data Operand = Dynamic !Register | Static !Constant
+-- | An operand to an instruction.
+data Operand
+  = Dynamic !Register  -- ^ Register
+  | Static !Constant  -- ^ Immediate
   deriving (Eq, Ord)
 
+-- | Case analysis on operands.
 operand :: (Register -> a) -> (Constant -> a) -> Operand -> a
 operand dynamic _ (Dynamic x) = dynamic x
 operand _ static (Static x) = static x
@@ -48,10 +52,12 @@ instance Show (Node e x) where
   show = \case
     NLabel label -> show label ++ ":"
     NAdd a b c -> '\t' : unwords [show a, ":=", show b, "+", show c]
-    NCall a _ b next -> '\t' : unwords [show b, ":= call", show a, "then", show next]
+    NCall a _ b next -> '\t' : unwords
+      [show b, ":= call", show a, "then", show next]
     NEquals a b c -> '\t' : unwords [show a, ":=", show b, "=", show c]
     NJump label -> '\t' : unwords ["jump", show label]
-    NJumpIfZero a t f -> '\t' : unwords ["if", show a, "= 0 then", show t, "else", show f]
+    NJumpIfZero a t f -> '\t' : unwords
+      ["if", show a, "= 0 then", show t, "else", show f]
     NLessThan a b c -> '\t' : unwords [show a, ":=", show b, "<", show c]
     NMultiply a b c -> '\t' : unwords [show a, ":=", show b, "*", show c]
     NNegate a b -> '\t' : unwords [show a, ":= -", show b]
@@ -59,6 +65,7 @@ instance Show (Node e x) where
     NReturn a -> '\t' : unwords ["ret", show a]
     NSet a b -> '\t' : unwords [show a, ":=", show b]
 
+-- | The set of labels to which a final instruction may branch.
 instance NonLocal Node where
   entryLabel (NLabel l) = l
   successors = \case
@@ -67,6 +74,7 @@ instance NonLocal Node where
     NJumpIfZero _ t f -> [t, f]
     NReturn{} -> []
 
+-- | The set of registers read or written by a node.
 registerSet :: Node e x -> Set Register
 registerSet = \case
   NLabel{} -> Set.empty

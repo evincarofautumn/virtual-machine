@@ -16,10 +16,10 @@ import qualified Data.Set as Set
 
 import Node
 import Types
+import Utils
 
 type LiveSet = Set Register
 
--- | Performs liveness analysis and eliminates dead assignments.
 pass :: (FuelMonad m) => LabelMap Depth -> BwdPass m Node LiveSet
 pass depths = BwdPass
   { bp_lattice = lattice, bp_transfer = transfer depths, bp_rewrite = rewrite }
@@ -34,15 +34,16 @@ lattice = DataflowLattice
     in (factChange, factJoin)
   }
 
+-- | Performs liveness analysis.
 transfer :: LabelMap Depth -> BwdTransfer Node LiveSet
 transfer depths = mkBTransfer3 initial medial final
   where
-  initial :: Node C O -> LiveSet -> LiveSet
+  initial :: Node C O -> Build LiveSet
   initial NLabel{} facts = facts
 
   -- A register is not alive before an assignment, so destination registers are
   -- always omitted from the fact base before proceeding.
-  medial :: Node O O -> LiveSet -> LiveSet
+  medial :: Node O O -> Build LiveSet
   medial instruction facts = case instruction of
     NAdd out _ _ -> addUsesBut out
     NEquals out _ _ -> addUsesBut out
@@ -70,6 +71,7 @@ transfer depths = mkBTransfer3 initial medial final
         Nothing -> 0
     NReturn _ -> addUses (fact_bot lattice) instruction
 
+-- | Eliminates dead assignments.
 rewrite :: forall m. (FuelMonad m) => BwdRewrite m Node LiveSet
 rewrite = mkBRewrite3 initial medial final
   where
@@ -94,5 +96,6 @@ rewrite = mkBRewrite3 initial medial final
 about :: FactBase (Set a) -> Label -> Set a
 facts `about` label = fromMaybe Set.empty $ lookupFact label facts
 
+-- | Adds the register set of a node to the fact base.
 addUses :: LiveSet -> Node e x -> LiveSet
 addUses to = (<> to) . registerSet

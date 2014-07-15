@@ -21,26 +21,31 @@ import qualified Data.Set as Set
 
 import Types
 
-newtype FlatProgram a = FlatProgram
-  { flatInstructions :: Vector (Labelled (Instruction a)) }
-  deriving (Show)
-
-data Origin = Parsed | Optimized
-
 -- | An instruction in the input program, indexed by whether it was constructed
--- by the parser or by the optimizer.
+-- by the optimizer. This avoids spurious cases when dealing with unoptimized
+-- flat programs. There is some signature duplication, but it can't be factored
+-- into type synonyms because those don't support strictness annotations.
 data Instruction (a :: Origin) where
   IAddRR :: !Register -> !Register -> !Register -> Instruction a
   IAddRC :: !Register -> !Register -> !Constant -> Instruction Optimized
   IAddR :: !Register -> !Register -> Instruction Optimized
   IAddC :: !Register -> !Constant -> Instruction Optimized
-  ICall :: {-lazy-}(Labelled Target) -> !Depth -> !Register -> {-lazy-}(Labelled Target) -> Instruction a
+  ICall
+    :: {-lazy-}(Labelled Target)
+    -> !Depth
+    -> !Register
+    -> {-lazy-}(Labelled Target)
+    -> Instruction a
   IEqualsRR :: !Register -> !Register -> !Register -> Instruction a
   IEqualsRC :: !Register -> !Register -> !Constant -> Instruction Optimized
   IEqualsR :: !Register -> !Register -> Instruction Optimized
   IEqualsC :: !Register -> !Constant -> Instruction Optimized
   IJump :: {-lazy-}(Labelled Target) -> Instruction a
-  IJumpIfZero :: !Register -> {-lazy-}(Labelled Target) -> {-lazy-}(Labelled Target) -> Instruction a
+  IJumpIfZero
+    :: !Register
+    -> {-lazy-}(Labelled Target)
+    -> {-lazy-}(Labelled Target)
+    -> Instruction a
   ILessThanRR :: !Register -> !Register -> !Register -> Instruction a
   ILessThanRC :: !Register -> !Register -> !Constant -> Instruction Optimized
   ILessThanR :: !Register -> !Register -> Instruction Optimized
@@ -59,6 +64,15 @@ data Instruction (a :: Origin) where
 
 deriving instance Show (Instruction a)
 
+-- | A flat program of labelled instructions.
+newtype FlatProgram a = FlatProgram
+  { flatInstructions :: Vector (Labelled (Instruction a)) }
+  deriving (Show)
+
+-- | The origin of an instruction: parsing or optimization.
+data Origin = Parsed | Optimized
+
+-- | The set of labels to which an instruction may branch.
 successorSet :: Instruction a -> Set Label
 successorSet = \case
   ICall (Labelled l _) _ _ (Labelled n _) -> Set.fromList [l, n]

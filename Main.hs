@@ -26,6 +26,7 @@ import System.IO.Error
 import qualified Data.Text.Lazy.IO as Lazy
 import qualified Data.Vector as Vector
 
+import Flatten
 import Optimize
 import Parse
 import Run
@@ -42,13 +43,16 @@ main = do
       (optimized, entry) <- return . runSimpleUniqueMonad $ do
         parseResult <- parse filename file
         case parseResult of
-          (_, Left message) -> error $ show message
-          (_idMap, Right parsed) -> do
+          Left message -> error $ show message
+          Right parsed -> do
             let (program, entry, depths) = unflatten parsed
             optimized <- optimize entry program depths
             return (optimized, entry)
-      result <- run entry optimized $ Vector.fromList (map read rawMachineArgs)
+      let (flattened, entry') = flatten entry optimized
+      result <- run entry' flattened
+        . Vector.fromList $ map read rawMachineArgs
       print result
+
       where
       missing e = if isDoesNotExistError e
         then bug $ concat

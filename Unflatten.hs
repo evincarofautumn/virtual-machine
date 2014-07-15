@@ -8,10 +8,10 @@ module Unflatten
   ( unflatten
   ) where
 
-import Control.Applicative
 import Compiler.Hoopl hiding ((<*>))
 import Data.List
 import Data.Maybe
+import Data.Set (Set)
 
 import qualified Compiler.Hoopl as Hoopl
 import qualified Data.Set as Set
@@ -29,29 +29,30 @@ unflatten (FlatProgram (Vector.toList -> instructions)) =
   ( foldl' (|*><*|) emptyClosedGraph blockified
   , labelledLabel $ head instructions
   , mapFromList $ mapMaybe
-    (\block -> (,)
-      (head . setElems $ labelsDefined block)  -- Possibly unsafe use of 'head'.
-      . (\ (Register n) -> Depth (abs n))
-      <$>
-      (foldGraphNodes (\node -> min (minRegisterMaybe node)) block . Just $ Register 0)
-    )
+    (\block -> fmap
+      ((,) (head . setElems $ labelsDefined block)
+        . (\ (Register n) -> Depth (abs n)))
+      $ foldGraphNodes
+        (\node -> min (minRegisterMaybe node))
+        block
+        (Just (Register 0)))
     blockified
   )
   where
-  minRegisterMaybe node = let
-    set = registerSet node
-    in if Set.null set then Nothing else Just (Set.findMin set)
-
+  blockified :: [Graph Node C C]
   blockified = map (uncurry blockify)
     . zip grouped
     $ map (Just . labelledLabel . head) (tail grouped) ++ [Nothing]
 
+  usedLabels :: Set Label
   usedLabels = mconcatMap (successorSet . labelledValue) instructions
 
+  grouped :: [[Labelled (Instruction Parsed)]]
   grouped = splitWhen
     (\x y -> isFinal x || labelledLabel y `Set.member` usedLabels)
     instructions
 
+  blockify :: [Labelled (Instruction a)] -> Maybe Label -> Graph Node C C
   blockify is@(i : _) mNext = let
     (medials, is') = spanJust toMedial is
     (mFinal, is'') = spanJust1 toFinal is'
@@ -65,6 +66,7 @@ unflatten (FlatProgram (Vector.toList -> instructions)) =
     in mkFirst initial Hoopl.<*> mkMiddles medials Hoopl.<*> mkLast final
   blockify [] _ = emptyClosedGraph
 
+  toMedial :: Labelled (Instruction a) -> Maybe (Node O O)
   toMedial (Labelled _ instruction) = case instruction of
     IAddRR out left right -> Just $ NAdd out left (Dynamic right)
     IEqualsRR out left right -> Just $ NEquals out left (Dynamic right)
@@ -76,6 +78,7 @@ unflatten (FlatProgram (Vector.toList -> instructions)) =
     ISetRC register constant -> Just $ NSet register (Static constant)
     _ -> Nothing
 
+  toFinal :: Labelled (Instruction a) -> Maybe (Node O C)
   toFinal (Labelled _ instruction) = case instruction of
     ICall (Labelled target _) depth register (Labelled next _)
       -> Just $ NCall target depth register next
@@ -85,9 +88,16 @@ unflatten (FlatProgram (Vector.toList -> instructions)) =
     IReturn register -> Just $ NReturn register
     _ -> Nothing
 
+  isFinal :: Labelled (Instruction a) -> Bool
   isFinal (Labelled _ instruction) = case instruction of
     ICall{} -> True
     IJump{} -> True
     IJumpIfZero{} -> True
     IReturn{} -> True
     _ -> False
+
+-- | The minimum register used by a node, if any.
+minRegisterMaybe :: Node e x -> Maybe Register
+minRegisterMaybe node = let
+  set = registerSet node
+  in if Set.null set then Nothing else Just (Set.findMin set)
