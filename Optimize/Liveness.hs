@@ -84,7 +84,7 @@ rewrite = mkBRewrite3 initial medial final
     NMultiply out _ _ | dead out -> Just emptyGraph
     NNegate out _ | dead out -> Just emptyGraph
     NNot out _ | dead out -> Just emptyGraph
-    NSet out _ | dead out -> Just emptyGraph
+    NSet out in_ | dead out || Dynamic out == in_ -> Just emptyGraph
     _ -> Nothing
     where dead = (`Set.notMember` facts)
 

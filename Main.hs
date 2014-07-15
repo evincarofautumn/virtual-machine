@@ -26,8 +26,6 @@ import System.IO.Error
 import qualified Data.Text.Lazy.IO as Lazy
 import qualified Data.Vector as Vector
 
-import Debug.Trace
-
 import Optimize
 import Parse
 import Run
@@ -47,11 +45,7 @@ main = do
           (_, Left message) -> error $ show message
           (_idMap, Right parsed) -> do
             let (program, entry, depths) = unflatten parsed
-            !_ <- trace "Input: " (return ())
-            !_ <- trace (showGraph show program) (return ())
             optimized <- optimize entry program depths
-            !_ <- trace ("\nOptimized: ") (return ())
-            !_ <- trace (showGraph show optimized) (return ())
             return (optimized, entry)
       result <- run entry optimized $ Vector.fromList (map read rawMachineArgs)
       print result

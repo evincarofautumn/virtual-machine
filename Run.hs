@@ -1,5 +1,6 @@
 {-#
-  LANGUAGE DataKinds
+  LANGUAGE BangPatterns
+  , DataKinds
   , GADTs
   #-}
 
@@ -9,7 +10,6 @@ module Run
 
 import Compiler.Hoopl hiding ((<*>))
 import Control.Applicative
-import Data.Function
 import Data.IORef
 import Data.Map (Map)
 import Data.Vector (Vector)
@@ -37,36 +37,31 @@ data Action
   | Resume
   | Halt !Cell
 
-data StackFrame = StackFrame
-  Target  -- ^ Jump target.
-  Depth  -- ^ Number of registers to save.
-  Register  -- ^ Register in which to save result.
-
 run :: Label -> Graph Node C C -> Vector Cell -> IO Cell
 run entry graph machineArguments = do
-  let (Target entry', instructions) = flatten entry graph
-  putStrLn "Flattened:"
-  mapM_ (\ (l, i) -> do putStr (show l ++ ": "); print i)
-    . zip [(0::Int)..] $ Vector.toList instructions
+  let (Target entry', !instructions0) = flatten entry graph
+  -- We don't actually need to mutate the instruction vector, but thawing allows
+  -- us to use unchecked reads, which saves a bounds check per instruction.
+  !instructions <- Vector.thaw instructions0
 
-  cs <- Mutable.new callStackSize
-  vs <- Unboxed.new valueStackSize
-  csp <- newIORef (0 :: Int)
-  vsp <- newIORef (0 :: Int)
-  pc <- newIORef entry'
+  cs <- Unboxed.new callStackSize  -- Call stack
+  vs <- Unboxed.new valueStackSize  -- Value stack
+  csp <- newIORef (0 :: Int)  -- Call stack pointer
+  vsp <- newIORef (0 :: Int)  -- Value stack pointer
+  pc <- newIORef entry'  -- Program counter
 
   let
 
     {-# INLINE pushValue #-}
     pushValue value = do
       vsp' <- readIORef vsp
-      Unboxed.write vs vsp' value
+      Unboxed.unsafeWrite vs vsp' value
       modifyIORef' vsp succ
 
     {-# INLINE pushCall #-}
     pushCall value = do
       csp' <- readIORef csp
-      Mutable.write cs csp' value
+      Unboxed.unsafeWrite cs csp' value
       modifyIORef' csp succ
 
     {-# INLINE binary #-}
@@ -87,10 +82,10 @@ run entry graph machineArguments = do
 
     {-# INLINE writeRegister #-}
     writeRegister (Register n) x
-      = registerOffset n >>= \n' -> Unboxed.write vs n' x
+      = registerOffset n >>= \n' -> Unboxed.unsafeWrite vs n' x
 
     {-# INLINE readRegister #-}
-    readRegister (Register n) = Unboxed.read vs =<< registerOffset n
+    readRegister (Register n) = Unboxed.unsafeRead vs =<< registerOffset n
 
     {-# INLINE registerOffset #-}
     registerOffset n = (+) <$> readIORef vsp <*> pure n
@@ -105,17 +100,23 @@ run entry graph machineArguments = do
     halt = return . Halt
 
     {-# INLINE enter #-}
-    enter frame@(StackFrame _ (Depth depth) _) = do
-      pushCall frame
+    enter (Depth depth) target = do
+      pushCall =<< readIORef pc
       modifyIORef' vsp (+ depth)
+      jump target
 
     -- Invariant: call stack is not empty.
     {-# INLINE leave #-}
-    leave = do
-      frame@(StackFrame _ (Depth depth) _) <- Mutable.read cs . pred =<< readIORef csp
+    leave result = do
+      target <- Unboxed.unsafeRead cs . pred =<< readIORef csp
+      -- We reload the call instruction so that we only have to store the return
+      -- address on the call stack, not the output register or next address.
+      ICall _ (Depth depth) out (Labelled _ next)
+        <- Mutable.unsafeRead instructions target
       modifyIORef' vsp (subtract depth)
       modifyIORef' csp pred
-      return frame
+      writeRegister out result
+      jump next
 
     {-# INLINE bool #-}
     bool :: Bool -> Cell
@@ -123,52 +124,49 @@ run entry graph machineArguments = do
 
   Vector.mapM_ pushValue machineArguments
 
-  fix $ \loop -> do
-    instruction <- (instructions Vector.!) <$> readIORef pc
+  let
+    loop = do
+      instruction <- Mutable.unsafeRead instructions =<< readIORef pc
 
-    action <- case instruction of
-      IAddRR out left right -> binary (+) out left right >> proceed
-      IAddRC out left (Constant right) -> unary (+ right) out left >> proceed
-      IAddR out in_ -> inPlaceBinary (+) out in_ >> proceed
-      IAddC out (Constant in_) -> inPlaceUnary (+ in_) out >> proceed
-      ICall (Labelled _ target) depth result (Labelled _ next) -> do
-        enter $ StackFrame next depth result
-        jump target
-      IEqualsRR out left right -> binary (bool .: (==)) out left right >> proceed
-      IEqualsRC out left (Constant right) -> unary (bool . (== right)) out left >> proceed
-      IEqualsR out in_ -> inPlaceBinary (bool .: (==)) out in_ >> proceed
-      IEqualsC out (Constant in_) -> inPlaceUnary (bool . (== in_)) out >> proceed
-      IJump (Labelled _ target) -> jump target
-      IJumpIfZero register (Labelled _ target) (Labelled _ next) -> do
-        value <- readRegister register
-        if value == 0 then jump target else jump next
-      ILessThanRR out left right -> binary (bool .: (<)) out left right >> proceed
-      ILessThanRC out left (Constant right) -> unary (bool . (< right)) out left >> proceed
-      ILessThanR out in_ -> inPlaceBinary (bool .: (<)) out in_ >> proceed
-      ILessThanC out (Constant in_) -> inPlaceUnary (bool . (< in_)) out >> proceed
-      IMultiplyRR out left right -> binary (*) out left right >> proceed
-      IMultiplyRC out left (Constant right) -> unary (* right) out left >> proceed
-      IMultiplyR out in_ -> inPlaceBinary (*) out in_ >> proceed
-      IMultiplyC out (Constant in_) -> inPlaceUnary (* in_) out >> proceed
-      INegateR out in_ -> unary negate out in_ >> proceed
-      INegate out -> inPlaceUnary negate out >> proceed
-      INotR out in_ -> unary (bool . (== 0)) out in_ >> proceed
-      INot out -> inPlaceUnary (bool . (== 0)) out >> proceed
-      IReturn result -> do
-        csp' <- pred <$> readIORef csp
-        result' <- readRegister result
-        if csp' < 0 then halt result' else do
-          StackFrame next _ out <- leave
-          writeRegister out result'
-          jump next
-      ISetRR out in_ -> unary id out in_ >> proceed
-      ISetRC register (Constant constant)
-        -> writeRegister register constant >> proceed
+      action <- case instruction of
+        IAddRR out left right -> {-# SCC "IAddRR" #-} binary (+) out left right >> proceed
+        IAddRC out left (Constant right) -> {-# SCC "IAddRC" #-} unary (+ right) out left >> proceed
+        IAddR out in_ -> {-# SCC "IAddR" #-} inPlaceBinary (+) out in_ >> proceed
+        IAddC out (Constant in_) -> {-# SCC "IAddC" #-} inPlaceUnary (+ in_) out >> proceed
+        ICall (Labelled _ target) depth _ _ -> {-# SCC "ICall" #-} enter depth target
+        IEqualsRR out left right -> {-# SCC "IEqualsRR" #-} binary (bool .: (==)) out left right >> proceed
+        IEqualsRC out left (Constant right) -> {-# SCC "IEqualsRC" #-} unary (bool . (== right)) out left >> proceed
+        IEqualsR out in_ -> {-# SCC "IEqualsR" #-} inPlaceBinary (bool .: (==)) out in_ >> proceed
+        IEqualsC out (Constant in_) -> {-# SCC "IEqualsC" #-} inPlaceUnary (bool . (== in_)) out >> proceed
+        IJump (Labelled _ target) -> {-# SCC "IJump" #-} jump target
+        IJumpIfZero register (Labelled _ target) (Labelled _ next) -> {-# SCC "IJumpIfZero" #-} do
+          value <- readRegister register
+          if value == 0 then jump target else jump next
+        ILessThanRR out left right -> {-# SCC "ILessThanRR" #-} binary (bool .: (<)) out left right >> proceed
+        ILessThanRC out left (Constant right) -> {-# SCC "ILessThanRC" #-} unary (bool . (< right)) out left >> proceed
+        ILessThanR out in_ -> {-# SCC "ILessThanR" #-} inPlaceBinary (bool .: (<)) out in_ >> proceed
+        ILessThanC out (Constant in_) -> {-# SCC "ILessThanC" #-} inPlaceUnary (bool . (< in_)) out >> proceed
+        IMultiplyRR out left right -> {-# SCC "IMultiplyRR" #-} binary (*) out left right >> proceed
+        IMultiplyRC out left (Constant right) -> {-# SCC "IMultiplyRC" #-} unary (* right) out left >> proceed
+        IMultiplyR out in_ -> {-# SCC "IMultiplyR" #-} inPlaceBinary (*) out in_ >> proceed
+        IMultiplyC out (Constant in_) -> {-# SCC "IMultiplyC" #-} inPlaceUnary (* in_) out >> proceed
+        INegateR out in_ -> {-# SCC "INegateR" #-} unary negate out in_ >> proceed
+        INegate out -> {-# SCC "INegate" #-} inPlaceUnary negate out >> proceed
+        INotR out in_ -> {-# SCC "INotR" #-} unary (bool . (== 0)) out in_ >> proceed
+        INot out -> {-# SCC "INot" #-} inPlaceUnary (bool . (== 0)) out >> proceed
+        IReturn result -> {-# SCC "IReturn" #-} do
+          csp' <- pred <$> readIORef csp
+          result' <- readRegister result
+          if csp' < 0 then halt result' else leave result'
+        ISetRR out in_ -> {-# SCC "ISetRR" #-} unary id out in_ >> proceed
+        ISetRC register (Constant constant)
+          -> {-# SCC "ISetRC" #-} writeRegister register constant >> proceed
 
-    case action of
-      Proceed -> modifyIORef' pc succ >> loop
-      Resume -> loop
-      Halt value -> return value
+      case action of
+        Proceed -> modifyIORef' pc succ >> loop
+        Resume -> loop
+        Halt value -> return value
+    in loop
 
   where
   callStackSize = (2::Int) ^ (12::Int)

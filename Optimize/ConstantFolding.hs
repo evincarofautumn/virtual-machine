@@ -89,7 +89,7 @@ rewrite :: forall m. (FuelMonad m) => FwdRewrite m Node ValueSet
 rewrite = mkFRewrite3 initial medial final
   where
   initial :: Node C O -> ValueSet -> m (Maybe (Graph Node C O))
-  initial _node _facts = return Nothing
+  initial _instruction _facts = return Nothing
 
   medial :: Node O O -> ValueSet -> m (Maybe (Graph Node O O))
   medial instruction facts = case instruction of
@@ -117,7 +117,11 @@ rewrite = mkFRewrite3 initial medial final
       _ -> return Nothing
 
   final :: Node O C -> ValueSet -> m (Maybe (Graph Node O C))
-  final _node _facts = return Nothing
+  final instruction facts = case instruction of
+    NJumpIfZero condition true false
+      | Just (PElem (Constant constant)) <- Map.lookup condition facts
+      -> return . Just . mkLast . NJump $ if constant == 0 then true else false
+    _ -> return Nothing
 
 initialFacts :: Label -> FactBase ValueSet
 initialFacts entry
