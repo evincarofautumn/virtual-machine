@@ -16,7 +16,7 @@ executable virtual-machine
   ghc-options:
     -Wall
     -Werror
-    -O3
+    -O2
 
   if flag(prof)
     ghc-options:
