@@ -1,0 +1,49 @@
+A sketch of a "simple register machine".
+
+    cabal configure
+    cabal install --only-dependencies
+    cabal build
+    time ./dist/build/virtual-machine/virtual-machine euler-3.sbc 34254526
+    time ./dist/build/virtual-machine/virtual-machine fib.sbc 39
+
+10-second architecture overview:
+
+    Parse -> instructions
+    Unflatten -> nodes
+    Optimize -> nodes
+    Flatten -> instructions
+    Run -> results + heat
+
+Since time was limited, only two representative optimization passes are done:
+dead assignment elimination and constant propagation/folding. This gives about a
+25% speedup over the reference implementation on the two example programs.
+
+The optimizations are implemented using a dataflow analysis framework called
+Hoopl, which I hadn't used before and felt like learning about. Briefly, Hoopl
+optimizations are written in terms of analysis and rewrite passes operating on
+lattices of dataflow facts associated with labels in a control flow graph of
+basic blocks.
+
+As far as value representation goes, the call and value stacks use unboxed
+mutable vectors as in the reference implementation. However, for performance
+reasons, this implementation does not use bounds checking; a separate analysis
+pass might reinstate the safety of the original implementation without the
+per-access runtime cost.
+
+There are a few obvious improvements to be made. In particular, I think even
+naïve function inlining would improve performance dramatically, due to the high
+call rate. In addition, dataflow analysis could eliminate the relatively high
+amount of stack traffic. There don't seem to be many opportunities to improve on
+value representation, because there is only a single data type, but the
+interpreter could perhaps be made more cache-friendly by localizing instruction
+accesses, or by switching to (say) an indirect threaded implementation in C.
+
+As evidenced by the internal instructions I added for the optimizer, there is a
+lot that can be done without control over the virtual machine architecture, as
+long as the optimized instructions can be inferred from the basic set. However,
+broadly speaking, I would like to see the instruction set fleshed out with
+instructions that can better express the intent of a programmer, so that the
+runtime can more faithfully optimize.
+
+If I had a month to work on this, I estimate conservatively that I could make it
+twice as fast.
