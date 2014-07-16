@@ -1,18 +1,13 @@
 {-#
   LANGUAGE OverloadedStrings
-  , BangPatterns
   , FlexibleContexts
   , FlexibleInstances
   , GADTs
   , GeneralizedNewtypeDeriving
   , LambdaCase
   , NoMonomorphismRestriction
-  , PatternGuards
-  , RecordWildCards
   , ScopedTypeVariables
-  , StandaloneDeriving
   , TypeFamilies
-  , ViewPatterns
   #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 

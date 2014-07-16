@@ -72,7 +72,7 @@ transfer = mkFTransfer3 initial medial final
     NCall target (Depth _depth) out next
       -> mkFactBase lattice
         [ (target, facts)
-        , (next, foldr (\v -> Map.insert v Top) facts (out : arguments))
+        , (next, foldr (`Map.insert` Top) facts (out : arguments))
         ]
       where
       -- We don't know which arguments the called procedure will overwrite, so

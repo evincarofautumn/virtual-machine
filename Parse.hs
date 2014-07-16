@@ -70,7 +70,7 @@ parse filename file = liftM snd . runIdMap
   register2 mnemonic constructor
     = constructor <$ mnemonic <*> registerComma <*> register
   register3 mnemonic constructor
-    = constructor <$ mnemonic <*> registerComma <*> registerComma <*> register
+    = register2 mnemonic constructor <*> (comma *> register)
   registerComma = register <* comma
   lexeme = (<* horizontals)
   word = lexeme . string

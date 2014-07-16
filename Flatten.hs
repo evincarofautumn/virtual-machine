@@ -9,6 +9,7 @@ module Flatten
 
 import Compiler.Hoopl hiding ((<*>))
 import Data.Map (Map)
+import Data.Maybe
 import Data.Vector (Vector)
 
 import qualified Data.Map as Map
@@ -34,10 +35,9 @@ flatten entry graph =
     = foldGraphNodes addNode graph (Map.empty, [])
 
   targetForLabel :: Label -> Labelled Target
-  targetForLabel label = Labelled label $ Target
-    $ case Map.lookup label finalLabels of
-      Nothing -> error $ unwords ["Missing target for label", show label]
-      Just target -> target
+  targetForLabel label = Labelled label . Target
+    . fromMaybe (error $ unwords ["Missing target for label", show label])
+    $ Map.lookup label finalLabels
 
   addNode :: Node e x -> Build (Map Label Int, [Instruction Optimized])
   addNode i (labels, is) = case i of

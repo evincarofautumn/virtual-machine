@@ -33,15 +33,14 @@ unflatten (FlatProgram (Vector.toList -> instructions)) =
       ((,) (head . setElems $ labelsDefined block)
         . (\ (Register n) -> Depth (abs n)))
       $ foldGraphNodes
-        (\node -> min (minRegisterMaybe node))
+        (min . minRegisterMaybe)
         block
         (Just (Register 0)))
     blockified
   )
   where
   blockified :: [Graph Node C C]
-  blockified = map (uncurry blockify)
-    . zip grouped
+  blockified = zipWith blockify grouped
     $ map (Just . labelledLabel . head) (tail grouped) ++ [Nothing]
 
   usedLabels :: Set Label

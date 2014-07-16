@@ -107,15 +107,14 @@ run instructions0 (Target entry) machineArguments = do
     halt = return . Halt
     {-# INLINE halt #-}
 
-    {-# INLINE enter #-}
     enter :: Depth -> Target -> IO Action
     enter (Depth depth) target = do
       pushCall =<< readIORef pc
       modifyIORef' vsp (+ depth)
       jump target
+    {-# INLINE enter #-}
 
     -- Invariant: call stack is not empty.
-    {-# INLINE leave #-}
     leave :: Cell -> IO Action
     leave result = do
       target <- Unboxed.unsafeRead cs . pred =<< readIORef csp
@@ -127,10 +126,11 @@ run instructions0 (Target entry) machineArguments = do
       modifyIORef' csp pred
       writeRegister out result
       jump next
+    {-# INLINE leave #-}
 
-    {-# INLINE bool #-}
     bool :: Bool -> Cell
     bool x = if x then 1 else 0
+    {-# INLINE bool #-}
 
   Vector.mapM_ pushValue machineArguments
 
@@ -162,7 +162,7 @@ run instructions0 (Target entry) machineArguments = do
         IJumpIfZero register (Labelled _ target) (Labelled _ next)
           -> {-# SCC "IJumpIfZero" #-} do
           value <- readRegister register
-          if value == 0 then jump target else jump next
+          jump $ if value == 0 then target else next
         ILessThanRR out left right -> {-# SCC "ILessThanRR" #-}
           binary (bool .: (<)) out left right >> proceed
         ILessThanRC out left (Constant right) -> {-# SCC "ILessThanRC" #-}
